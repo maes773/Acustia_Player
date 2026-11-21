@@ -6,14 +6,29 @@
 import { ListView } from "std-widgets.slint";
 
 export global Theme {
-    out property <color> bg: #e4e8ef;
-    out property <color> light: #ffffff;
-    out property <color> shadow: #b9c1d1;
-    out property <color> text: #3b4256;
-    out property <color> text-dim: #8c95aa;
-    out property <color> accent: #6577f5;
-    out property <color> inset-top: #d3d9e4;
-    out property <color> inset-bottom: #eef1f6;
+    // Estado del tema
+    in-out property <bool> dark-mode: false;
+
+    // Colores principales
+    out property <color> bg: dark-mode ? #242a36 : #e4e8ef;
+    out property <color> light: dark-mode ? #343c4d : #ffffff;
+    out property <color> shadow: dark-mode ? #171c26 : #b9c1d1;
+
+    // Textos
+    out property <color> text: dark-mode ? #e5eaf3 : #3b4256;
+    out property <color> text-dim: dark-mode ? #9ba6ba : #8c95aa;
+
+    // Acentos
+    out property <color> accent: dark-mode ? #91a2ff : #6577f5;
+
+    // Superficies hundidas
+    out property <color> inset-top: dark-mode ? #1c222e : #d3d9e4;
+    out property <color> inset-bottom: dark-mode ? #2c3443 : #eef1f6;
+
+    // Elementos adicionales
+    out property <color> selected: dark-mode ? #30394a : #d9deea;
+    out property <color> hover: dark-mode ? #ffffff0a : #00000008;
+    out property <color> border: dark-mode ? #ffffff18 : #ffffff80;
 }
 
 export struct TrackItem {
@@ -53,7 +68,7 @@ component NeuInset inherits Rectangle {
     border-radius: root.radius;
     background: @linear-gradient(135deg, Theme.inset-top 0%, Theme.inset-bottom 100%);
     border-width: 1px;
-    border-color: #ffffff80;
+    border-color: Theme.border;
 }
 
 // Botón redondo; al pulsarse o estar activo "se hunde".
@@ -168,7 +183,7 @@ component TrackRow inherits Rectangle {
     callback activated();
     height: 64px;
     border-radius: 14px;
-    background: root.item.current ? #d9deea : (ta.has-hover ? #00000008 : transparent);
+    background: root.item.current ? Theme.selected : (ta.has-hover ? Theme.hover : transparent);
 
     HorizontalLayout {
         padding-left: 12px;
@@ -550,6 +565,13 @@ export component MainWindow inherits Window {
                         root.pick-folder();
                     }
                 }
+                    NeuPill {
+    label: Theme.dark-mode ? "Modo claro" : "Modo oscuro";
+
+    clicked => {
+        Theme.dark-mode = !Theme.dark-mode;
+    }
+}
             }
 
             NeuInset {
