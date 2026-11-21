@@ -1,0 +1,11 @@
+[package]
+name = "auralis-player"
+description = "Controlador de reproducción de Auralis: une cola, lista de pistas y motor de audio (sin UI)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+auralis-core = { workspace = true }
+auralis-audio = { workspace = true }

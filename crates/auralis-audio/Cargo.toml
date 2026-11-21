@@ -1,0 +1,12 @@
+[package]
+name = "auralis-audio"
+description = "Motor de audio de Auralis: Symphonia (decodificación) + CPAL (salida), gapless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+symphonia = { workspace = true }
+cpal = "0.15"
+ringbuf = "0.4"

@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/auralis-core",
+    "crates/auralis-audio",
+    "crates/auralis-library",
+    "crates/auralis-player",
+    "crates/auralis-app",
+]
+
+[workspace.package]
+version = "0.0.1-alpha"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+auralis-core = { path = "crates/auralis-core" }
+auralis-audio = { path = "crates/auralis-audio" }
+auralis-library = { path = "crates/auralis-library" }
+auralis-player = { path = "crates/auralis-player" }
+
+# Symphonia: solo los formatos prioritarios de la v0.0.1 (menos código, binario más pequeño).
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "flac", "wav", "ogg", "vorbis", "pcm", "aiff"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# La decodificación en debug es muy lenta y provoca cortes de audio: optimizamos dependencias.
+[profile.dev.package."*"]
+opt-level = 2

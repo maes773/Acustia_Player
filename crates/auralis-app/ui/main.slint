@@ -1,0 +1,588 @@
+// Auralis v0.0.1 Alpha — interfaz neumórfica.
+// Neumorfismo: superficies del mismo color que el fondo, con una sombra clara
+// arriba-izquierda y otra oscura abajo-derecha. Slint admite una sola sombra
+// por elemento, así que se anidan dos rectángulos (ver NeuRaised).
+
+import { ListView } from "std-widgets.slint";
+
+export global Theme {
+    out property <color> bg: #e4e8ef;
+    out property <color> light: #ffffff;
+    out property <color> shadow: #b9c1d1;
+    out property <color> text: #3b4256;
+    out property <color> text-dim: #8c95aa;
+    out property <color> accent: #6577f5;
+    out property <color> inset-top: #d3d9e4;
+    out property <color> inset-bottom: #eef1f6;
+}
+
+export struct TrackItem {
+    title: string,
+    subtitle: string,
+    duration: string,
+    cover: image,
+    has-cover: bool,
+    current: bool,
+}
+
+// Superficie en relieve.
+component NeuRaised inherits Rectangle {
+    in property <length> radius: 18px;
+    in property <length> depth: 6px;
+    background: Theme.bg;
+    border-radius: root.radius;
+    drop-shadow-color: Theme.light;
+    drop-shadow-blur: root.depth * 2;
+    drop-shadow-offset-x: -root.depth;
+    drop-shadow-offset-y: -root.depth;
+
+    Rectangle {
+        background: Theme.bg;
+        border-radius: root.radius;
+        drop-shadow-color: Theme.shadow;
+        drop-shadow-blur: root.depth * 2;
+        drop-shadow-offset-x: root.depth;
+        drop-shadow-offset-y: root.depth;
+        @children
+    }
+}
+
+// Superficie hundida (aproximación con degradado).
+component NeuInset inherits Rectangle {
+    in property <length> radius: 18px;
+    border-radius: root.radius;
+    background: @linear-gradient(135deg, Theme.inset-top 0%, Theme.inset-bottom 100%);
+    border-width: 1px;
+    border-color: #ffffff80;
+}
+
+// Botón redondo; al pulsarse o estar activo "se hunde".
+component NeuButton inherits Rectangle {
+    in property <length> size: 56px;
+    in property <bool> active: false;
+    callback clicked();
+    width: root.size;
+    height: root.size;
+
+    NeuRaised {
+        radius: root.size / 2;
+        depth: (ta.pressed || root.active) ? 2px : 6px;
+        @children
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Botón alargado con texto.
+component NeuPill inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    height: 44px;
+    min-width: 150px;
+
+    NeuRaised {
+        radius: 22px;
+        depth: ta.pressed ? 2px : 5px;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 14px;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// Deslizador (progreso y volumen). `value` va de 0 a 1.
+component NeuSlider inherits Rectangle {
+    in-out property <float> value: 0;
+    out property <bool> dragging: ta.pressed;
+    callback moved(float);
+    callback released(float);
+    height: 24px;
+
+    function fraction(x: length) -> float {
+        return max(0.0, min(1.0, x / root.width));
+    }
+
+    NeuInset {
+        y: (root.height - 10px) / 2;
+        height: 10px;
+        radius: 5px;
+        Rectangle {
+            x: 0px;
+            width: parent.width * max(0.0, min(1.0, root.value));
+            border-radius: 5px;
+            background: Theme.accent;
+        }
+    }
+
+    NeuRaised {
+        width: 22px;
+        height: 22px;
+        radius: 11px;
+        depth: 3px;
+        x: (root.width - self.width) * max(0.0, min(1.0, root.value));
+        y: (root.height - self.height) / 2;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: Theme.accent;
+        }
+    }
+
+    ta := TouchArea {
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.left) {
+                if (e.kind == PointerEventKind.down) {
+                    root.value = root.fraction(self.mouse-x);
+                    root.moved(root.value);
+                } else if (e.kind == PointerEventKind.up) {
+                    root.released(root.value);
+                }
+            }
+        }
+        moved => {
+            if (self.pressed) {
+                root.value = root.fraction(self.mouse-x);
+                root.moved(root.value);
+            }
+        }
+    }
+}
+
+component TrackRow inherits Rectangle {
+    in property <TrackItem> item;
+    callback activated();
+    height: 64px;
+    border-radius: 14px;
+    background: root.item.current ? #d9deea : (ta.has-hover ? #00000008 : transparent);
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 16px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 14px;
+
+        Rectangle {
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            clip: true;
+            background: @linear-gradient(135deg, Theme.inset-top 0%, Theme.inset-bottom 100%);
+            if root.item.has-cover: Image {
+                source: root.item.cover;
+                image-fit: cover;
+                width: parent.width;
+                height: parent.height;
+            }
+            if !root.item.has-cover: Text {
+                text: "♪";
+                color: Theme.text-dim;
+                font-size: 20px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 2px;
+            Text {
+                text: root.item.title;
+                color: root.item.current ? Theme.accent : Theme.text;
+                font-size: 15px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: root.item.subtitle;
+                color: Theme.text-dim;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+
+        Text {
+            text: root.item.duration;
+            color: Theme.text-dim;
+            font-size: 13px;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.activated();
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "Auralis";
+    min-width: 880px;
+    min-height: 600px;
+    preferred-width: 1060px;
+    preferred-height: 680px;
+    background: Theme.bg;
+
+    // --- Datos (los rellena Rust) ---
+    in property <[TrackItem]> tracks;
+    in property <string> folder-name: "Ninguna carpeta seleccionada";
+    in property <string> status-message;
+    in property <string> current-title: "Auralis";
+    in property <string> current-artist: "Abre una carpeta con música";
+    in property <image> current-cover;
+    in property <bool> has-cover: false;
+    in property <string> position-text: "0:00";
+    in property <string> duration-text: "0:00";
+    in-out property <float> progress: 0;
+    in-out property <float> volume: 0.8;
+    in property <bool> playing: false;
+    in property <bool> shuffle: false;
+    in property <int> repeat-mode: 0; // 0 = desactivado, 1 = toda la lista, 2 = una canción
+    out property <bool> dragging: seek.dragging;
+
+    // --- Eventos hacia Rust ---
+    callback pick-folder();
+    callback play-index(int);
+    callback toggle-play();
+    callback next-track();
+    callback previous-track();
+    callback seek(float);
+    callback set-volume(float);
+    callback toggle-shuffle();
+    callback cycle-repeat();
+
+    HorizontalLayout {
+        padding: 32px;
+        spacing: 36px;
+
+        // ---------- Reproductor principal ----------
+        VerticalLayout {
+            width: 340px;
+            spacing: 20px;
+            alignment: center;
+
+            HorizontalLayout {
+                alignment: center;
+                NeuRaised {
+                    width: 270px;
+                    height: 270px;
+                    radius: 30px;
+                    depth: 10px;
+                    Rectangle {
+                        x: 16px;
+                        y: 16px;
+                        width: parent.width - 32px;
+                        height: parent.height - 32px;
+                        border-radius: 20px;
+                        clip: true;
+                        background: @linear-gradient(135deg, Theme.inset-top 0%, Theme.inset-bottom 100%);
+                        if root.has-cover: Image {
+                            source: root.current-cover;
+                            image-fit: cover;
+                            width: parent.width;
+                            height: parent.height;
+                        }
+                        if !root.has-cover: Text {
+                            text: "♪";
+                            color: Theme.text-dim;
+                            font-size: 84px;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                Text {
+                    text: root.current-title;
+                    color: Theme.text;
+                    font-size: 21px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+                Text {
+                    text: root.current-artist;
+                    color: Theme.text-dim;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                seek := NeuSlider {
+                    value <=> root.progress;
+                    released(v) => {
+                        root.seek(v);
+                    }
+                }
+                HorizontalLayout {
+                    Text {
+                        text: root.position-text;
+                        color: Theme.text-dim;
+                        font-size: 12px;
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.duration-text;
+                        color: Theme.text-dim;
+                        font-size: 12px;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 14px;
+
+                // Aleatorio
+                NeuButton {
+                    size: 46px;
+                    active: root.shuffle;
+                    clicked => {
+                        root.toggle-shuffle();
+                    }
+                    Rectangle {
+                        Path {
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 16px) / 2;
+                            width: 22px;
+                            height: 16px;
+                            viewbox-width: 22;
+                            viewbox-height: 16;
+                            commands: "M 0 3 L 5 3 C 10 3 11 13 16 13 L 19 13 M 0 13 L 5 13 C 10 13 11 3 16 3 L 19 3";
+                            stroke: root.shuffle ? Theme.accent : Theme.text-dim;
+                            stroke-width: 2px;
+                        }
+                        Path {
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 16px) / 2;
+                            width: 22px;
+                            height: 16px;
+                            viewbox-width: 22;
+                            viewbox-height: 16;
+                            commands: "M 17 0 L 22 3 L 17 6 Z M 17 10 L 22 13 L 17 16 Z";
+                            fill: root.shuffle ? Theme.accent : Theme.text-dim;
+                        }
+                    }
+                }
+
+                // Anterior
+                NeuButton {
+                    size: 56px;
+                    clicked => {
+                        root.previous-track();
+                    }
+                    Path {
+                        x: (parent.width - 18px) / 2;
+                        y: (parent.height - 18px) / 2;
+                        width: 18px;
+                        height: 18px;
+                        viewbox-width: 18;
+                        viewbox-height: 18;
+                        commands: "M 0 0 L 4 0 L 4 18 L 0 18 Z M 18 0 L 6 9 L 18 18 Z";
+                        fill: Theme.text;
+                    }
+                }
+
+                // Reproducir / pausar
+                NeuButton {
+                    size: 74px;
+                    clicked => {
+                        root.toggle-play();
+                    }
+                    if !root.playing: Path {
+                        x: (parent.width - 20px) / 2 + 2px;
+                        y: (parent.height - 24px) / 2;
+                        width: 20px;
+                        height: 24px;
+                        viewbox-width: 20;
+                        viewbox-height: 24;
+                        commands: "M 0 0 L 20 12 L 0 24 Z";
+                        fill: Theme.accent;
+                    }
+                    if root.playing: Path {
+                        x: (parent.width - 20px) / 2;
+                        y: (parent.height - 24px) / 2;
+                        width: 20px;
+                        height: 24px;
+                        viewbox-width: 20;
+                        viewbox-height: 24;
+                        commands: "M 0 0 L 7 0 L 7 24 L 0 24 Z M 13 0 L 20 0 L 20 24 L 13 24 Z";
+                        fill: Theme.accent;
+                    }
+                }
+
+                // Siguiente
+                NeuButton {
+                    size: 56px;
+                    clicked => {
+                        root.next-track();
+                    }
+                    Path {
+                        x: (parent.width - 18px) / 2;
+                        y: (parent.height - 18px) / 2;
+                        width: 18px;
+                        height: 18px;
+                        viewbox-width: 18;
+                        viewbox-height: 18;
+                        commands: "M 0 0 L 12 9 L 0 18 Z M 14 0 L 18 0 L 18 18 L 14 18 Z";
+                        fill: Theme.text;
+                    }
+                }
+
+                // Repetir (desactivado / toda la lista / una canción)
+                NeuButton {
+                    size: 46px;
+                    active: root.repeat-mode != 0;
+                    clicked => {
+                        root.cycle-repeat();
+                    }
+                    Rectangle {
+                        Path {
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 18px) / 2;
+                            width: 22px;
+                            height: 18px;
+                            viewbox-width: 22;
+                            viewbox-height: 18;
+                            commands: "M 3 9 L 3 8 C 3 5 5 3 8 3 L 16 3 M 19 9 L 19 10 C 19 13 17 15 14 15 L 6 15";
+                            stroke: root.repeat-mode != 0 ? Theme.accent : Theme.text-dim;
+                            stroke-width: 2px;
+                        }
+                        Path {
+                            x: (parent.width - 22px) / 2;
+                            y: (parent.height - 18px) / 2;
+                            width: 22px;
+                            height: 18px;
+                            viewbox-width: 22;
+                            viewbox-height: 18;
+                            commands: "M 15 0 L 20 3 L 15 6 Z M 7 12 L 2 15 L 7 18 Z";
+                            fill: root.repeat-mode != 0 ? Theme.accent : Theme.text-dim;
+                        }
+                        if root.repeat-mode == 2: Text {
+                            text: "1";
+                            color: Theme.accent;
+                            font-size: 9px;
+                            font-weight: 800;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+
+            // Volumen
+            HorizontalLayout {
+                spacing: 12px;
+                padding-top: 6px;
+                Path {
+                    width: 18px;
+                    height: 16px;
+                    y: 4px;
+                    viewbox-width: 18;
+                    viewbox-height: 16;
+                    commands: "M 0 5 L 4 5 L 9 0 L 9 16 L 4 11 L 0 11 Z M 12 4 C 14.5 6.5 14.5 9.5 12 12";
+                    fill: Theme.text-dim;
+                    stroke: Theme.text-dim;
+                    stroke-width: 1.5px;
+                }
+                NeuSlider {
+                    horizontal-stretch: 1;
+                    value <=> root.volume;
+                    moved(v) => {
+                        root.set-volume(v);
+                    }
+                }
+            }
+        }
+
+        // ---------- Biblioteca ----------
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 18px;
+
+            HorizontalLayout {
+                spacing: 18px;
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    spacing: 2px;
+                    Text {
+                        text: "Auralis";
+                        color: Theme.text;
+                        font-size: 26px;
+                        font-weight: 800;
+                    }
+                    Text {
+                        text: root.folder-name;
+                        color: Theme.text-dim;
+                        font-size: 12px;
+                        overflow: elide;
+                    }
+                }
+                NeuPill {
+                    label: "Abrir carpeta";
+                    clicked => {
+                        root.pick-folder();
+                    }
+                }
+            }
+
+            NeuInset {
+                vertical-stretch: 1;
+                radius: 22px;
+
+                if root.tracks.length == 0: Text {
+                    text: "Elige una carpeta para ver tu música";
+                    color: Theme.text-dim;
+                    font-size: 15px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                if root.tracks.length > 0: ListView {
+                    x: 10px;
+                    y: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height - 20px;
+                    for track[index] in root.tracks: TrackRow {
+                        item: track;
+                        activated => {
+                            root.play-index(index);
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: root.status-message;
+                color: Theme.text-dim;
+                font-size: 12px;
+                overflow: elide;
+            }
+        }
+    }
+}

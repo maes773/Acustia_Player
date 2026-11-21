@@ -1,0 +1,13 @@
+[package]
+name = "auralis-library"
+description = "Escaneo de carpetas y lectura básica de etiquetas/carátulas de Auralis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+auralis-core = { workspace = true }
+symphonia = { workspace = true }
+# Solo JPEG y PNG para las carátulas incrustadas (sin características por defecto).
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

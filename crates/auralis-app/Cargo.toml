@@ -1,0 +1,23 @@
+[package]
+name = "auralis"
+description = "Auralis: reproductor de música local (v0.0.1 Alpha)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "auralis"
+path = "src/main.rs"
+
+[dependencies]
+auralis-core = { workspace = true }
+auralis-library = { workspace = true }
+auralis-player = { workspace = true }
+slint = "1"
+# Diálogo nativo para elegir carpeta (Windows, macOS, Linux).
+rfd = "0.15"
+
+[build-dependencies]
+slint-build = "1"

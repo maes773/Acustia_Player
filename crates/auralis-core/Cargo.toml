@@ -1,0 +1,9 @@
+[package]
+name = "auralis-core"
+description = "Modelos y lógica de cola de reproducción de Auralis (sin dependencias, portable a Android)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
