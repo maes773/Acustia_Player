@@ -69,11 +69,46 @@ impl Engine {
         let epoch = self.shared.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.current = None;
         self.shared.playing.store(autoplay, Ordering::Relaxed);
-        let _ = self.tx.send(Cmd::Load {
+        let sent = self.tx.send(Cmd::Load {
             req,
             start_ms,
             epoch,
         });
+        if sent.is_err() {
+            self.report("el hilo decodificador se detuvo".into());
+        }
+    }
+
+    fn report(&self, message: String) {
+        if let Ok(mut slot) = self.shared.stream_error.lock() {
+            *slot = Some(message);
+        }
+    }
+
+    /// Último error del stream de audio (CPAL) o del hilo decodificador, si lo hubo.
+    pub fn take_stream_error(&self) -> Option<String> {
+        self.shared.stream_error.lock().ok().and_then(|mut s| s.take())
+    }
+
+    /// Resumen del estado interno para depuración (se muestra en la interfaz).
+    pub fn diagnostics(&self) -> String {
+        let s = &self.shared;
+        let rate = self.output.sample_rate.max(1) as f64;
+        let ch = self.output.channels.max(1) as f64;
+        let fill = s.ring_fill.load(Ordering::Relaxed) as f64 / (rate * ch) * 100.0;
+        format!(
+            "{} · {} Hz · {} canales · {} | callbacks {} · buffer {:.0}% · underruns {} · decodificado {:.1}s · reproducido {:.1}s · {}",
+            self.output.device_name,
+            self.output.sample_rate,
+            self.output.channels,
+            self.output.format,
+            s.callbacks.load(Ordering::Relaxed),
+            fill,
+            s.underruns.load(Ordering::Relaxed),
+            s.pushed_total.load(Ordering::Relaxed) as f64 / rate,
+            s.played_frames.load(Ordering::Relaxed) as f64 / rate,
+            if s.playing.load(Ordering::Relaxed) { "play" } else { "pausa" },
+        )
     }
 
     /// Pista que debe sonar a continuación sin silencio. `None` = nada.

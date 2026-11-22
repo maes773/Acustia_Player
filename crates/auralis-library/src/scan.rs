@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use auralis_core::TrackInfo;
+use thread_priority::{set_current_thread_priority, ThreadPriority};
 
 use crate::metadata::{read_metadata, TrackMeta};
 
@@ -70,6 +71,9 @@ pub fn scan_folder(
     thread::Builder::new()
         .name("auralis-scan".into())
         .spawn(move || {
+            // Prioridad baja: leer etiquetas y decodificar carátulas no debe quitar
+            // CPU al hilo de audio. Si el sistema no lo permite, se sigue igual.
+            let _ = set_current_thread_priority(ThreadPriority::Min);
             let paths = list_audio_files(&root).unwrap_or_default();
             let infos: Vec<TrackInfo> = paths.iter().cloned().map(TrackInfo::from_path).collect();
             if tx.send(ScanEvent::Files(infos)).is_err() {

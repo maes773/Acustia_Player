@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use ringbuf::traits::{Observer, Producer};
 use ringbuf::HeapProd;
+use thread_priority::{set_current_thread_priority, ThreadPriority};
 
 use crate::converter::Converter;
 use crate::engine::Event;
@@ -28,6 +29,11 @@ struct Active {
     req: TrackRequest,
     reader: TrackReader,
     conv: Option<Converter>,
+    /// Fotogramas de salida producidos por esta pista (0 al llegar al final = fallo).
+    produced: u64,
+    /// El archivo se leyó entero y la cola del conversor ya está en `pending`:
+    /// en cuanto se vacíe se encadena la pista siguiente.
+    eof: bool,
 }
 
 pub struct Ctx {
@@ -48,6 +54,9 @@ struct State {
 }
 
 pub fn run(ctx: Ctx, rx: Receiver<Cmd>) {
+    // Prioridad alta: este hilo no debe quedarse sin CPU frente a la interfaz
+    // o al escaneo de la biblioteca. Si el sistema no lo permite, se sigue igual.
+    let _ = set_current_thread_priority(ThreadPriority::Max);
     let mut st = State {
         ctx,
         epoch: 0,
@@ -83,9 +92,18 @@ pub fn run(ctx: Ctx, rx: Receiver<Cmd>) {
                     epoch,
                 } => {
                     st.epoch = epoch;
+                    // `streaming` antes del flush: el callback hace pre-roll en vez
+                    // de arrancar con el buffer vacío.
+                    st.ctx.shared.streaming.store(true, Ordering::Relaxed);
                     st.flush();
                     raw.clear();
                     active = st.open(req, start_ms);
+                    if active.is_none() {
+                        // No se pudo abrir: `open` ya envió el `Error`. No se escribe
+                        // `End` (generaría un `Finished` previo al error y el
+                        // controlador no saltaría a la siguiente pista).
+                        st.ctx.shared.streaming.store(false, Ordering::Relaxed);
+                    }
                 }
             }
             continue;
@@ -100,6 +118,25 @@ pub fn run(ctx: Ctx, rx: Receiver<Cmd>) {
         }
 
         // 3) Decodificar más audio.
+        if active.as_ref().is_some_and(|a| a.eof) {
+            // Fin de pista (con la cola del conversor ya vaciada): encadenar la
+            // siguiente sin silencio (gapless).
+            let next = st
+                .ctx
+                .shared
+                .next_slot
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take());
+            active = match next {
+                Some(req) => st.open(req, 0),
+                None => None,
+            };
+            if active.is_none() {
+                st.push_end();
+            }
+            continue;
+        }
         let Some(a) = active.as_mut() else { continue };
         let id = a.req.id;
         match a.reader.read(&mut raw) {
@@ -110,30 +147,36 @@ pub fn run(ctx: Ctx, rx: Receiver<Cmd>) {
                 converted.clear();
                 conv.process(&raw, &mut converted);
                 raw.clear();
+                a.produced += (converted.len() / st.ctx.out_channels) as u64;
                 st.pending.clear();
                 st.pending.extend_from_slice(&converted);
                 st.pending_pos = 0;
             }
             Ok(None) => {
-                // Fin de pista: encadenar la siguiente sin silencio (gapless).
-                let next = st
-                    .ctx
-                    .shared
-                    .next_slot
-                    .lock()
-                    .ok()
-                    .and_then(|mut slot| slot.take());
-                match next {
-                    Some(req) => {
-                        active = st.open(req, 0);
-                        if active.is_none() {
-                            st.push_end();
-                        }
-                    }
-                    None => {
-                        st.push_end();
-                        active = None;
-                    }
+                // Vaciar la cola del filtro de remuestreo: sin esto se perdería el
+                // final de cada pista (y cada empalme gapless dejaría un salto).
+                converted.clear();
+                if let Some(conv) = a.conv.as_mut() {
+                    conv.finish(&mut converted);
+                }
+                a.produced += (converted.len() / st.ctx.out_channels) as u64;
+                if a.produced == 0 {
+                    // Llegó al final sin haber producido ni un fotograma: no es una
+                    // pista vacía legítima, es un fallo que no debe pasar en silencio.
+                    let _ = st.ctx.events.send((
+                        st.epoch,
+                        Event::Error {
+                            id,
+                            message: "no se obtuvo audio del archivo".into(),
+                        },
+                    ));
+                    st.push_end();
+                    active = None;
+                } else {
+                    st.pending.clear();
+                    st.pending.extend_from_slice(&converted);
+                    st.pending_pos = 0;
+                    a.eof = true;
                 }
             }
             Err(e) => {
@@ -187,6 +230,8 @@ impl State {
                     req,
                     reader,
                     conv: None,
+                    produced: 0,
+                    eof: false,
                 })
             }
             Err(e) => {
@@ -211,6 +256,8 @@ impl State {
         if let Ok(mut b) = self.ctx.shared.boundaries.lock() {
             b.push_back(boundary);
         }
+        // Ya no se producirá más audio: el silencio posterior no es un corte.
+        self.ctx.shared.streaming.store(false, Ordering::Relaxed);
     }
 
     /// Empuja lo que quepa (solo fotogramas completos). `false` si no hay sitio.
@@ -226,6 +273,10 @@ impl State {
         let pushed = self.ctx.prod.push_slice(&remaining[..n]);
         self.pending_pos += pushed;
         self.pushed_frames += (pushed / ch) as u64;
+        self.ctx
+            .shared
+            .pushed_total
+            .fetch_add((pushed / ch) as u64, Ordering::Relaxed);
         true
     }
 }

@@ -10,3 +10,5 @@ publish.workspace = true
 symphonia = { workspace = true }
 cpal = "0.15"
 ringbuf = "0.4"
+# Prioridad alta para el hilo decodificador (ignora el error si el sistema no lo permite).
+thread-priority = "1"

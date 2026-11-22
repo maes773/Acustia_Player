@@ -11,3 +11,5 @@ auralis-core = { workspace = true }
 symphonia = { workspace = true }
 # Solo JPEG y PNG para las carátulas incrustadas (sin características por defecto).
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# El escaneo corre con prioridad baja para no competir con la reproducción.
+thread-priority = "1"

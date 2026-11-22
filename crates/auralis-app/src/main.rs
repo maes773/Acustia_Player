@@ -19,6 +19,9 @@ use auralis_library::{read_cover, scan_folder, CoverImage, ScanEvent};
 use auralis_player::{Player, Snapshot, Status};
 use slint::{ComponentHandle, Model, VecModel};
 
+mod tray;
+use tray::{Tray, TrayAction};
+
 slint::include_modules!();
 
 /// Tamaño (px) de la carátula del reproductor principal.
@@ -38,6 +41,34 @@ struct AppState {
     shown_current: Option<usize>,
     duration_ms: Option<u64>,
     total: usize,
+    /// Se crea la primera vez que se minimiza a la bandeja.
+    tray: Option<Tray>,
+}
+
+/// Oculta la ventana y deja un icono en la bandeja. Si no se puede crear el
+/// icono (o no es Windows), minimiza la ventana con normalidad.
+fn minimize_to_tray(st: &mut AppState, ui: &MainWindow) {
+    if st.tray.is_none() {
+        match Tray::new() {
+            Ok(t) => st.tray = Some(t),
+            Err(e) => {
+                ui.set_status_message(format!("Bandeja no disponible: {e}").into());
+                ui.window().set_minimized(true);
+                return;
+            }
+        }
+    }
+    if let Some(t) = &st.tray {
+        t.set_visible(true);
+    }
+    let _ = ui.hide();
+}
+
+fn restore_from_tray(st: &AppState, ui: &MainWindow) {
+    let _ = ui.show();
+    if let Some(t) = &st.tray {
+        t.set_visible(false);
+    }
 }
 
 fn to_image(c: &CoverImage) -> slint::Image {
@@ -232,6 +263,7 @@ fn main() -> Result<(), slint::PlatformError> {
         shown_current: None,
         duration_ms: None,
         total: 0,
+        tray: None,
     }));
     if let Some(p) = state.borrow_mut().player.as_mut() {
         p.set_volume(ui.get_volume());
@@ -305,6 +337,22 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    ui.on_minimize_to_tray({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                minimize_to_tray(&mut state.borrow_mut(), &ui);
+            }
+        }
+    });
+
+    // Cerrar con la X sale de la aplicación (la bandeja es solo para el botón de minimizar).
+    ui.window().on_close_requested(|| {
+        let _ = slint::quit_event_loop();
+        slint::CloseRequestResponse::HideWindow
+    });
+
     // Un único temporizador de 100 ms; no hay más trabajo periódico en la UI.
     let timer = slint::Timer::default();
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), {
@@ -313,14 +361,39 @@ fn main() -> Result<(), slint::PlatformError> {
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut st = state.borrow_mut();
+
+            // Acciones del icono de bandeja (siguen funcionando con la ventana oculta).
+            let actions = st.tray.as_ref().map(|t| t.poll()).unwrap_or_default();
+            for action in actions {
+                match action {
+                    TrayAction::Show => restore_from_tray(&st, &ui),
+                    TrayAction::TogglePlay => {
+                        if let Some(p) = st.player.as_mut() {
+                            p.toggle_play_pause();
+                        }
+                    }
+                    TrayAction::Quit => {
+                        let _ = slint::quit_event_loop();
+                    }
+                }
+            }
+
             drain_scan(&mut st, &ui);
             drain_covers(&mut st, &ui);
             let snapshot = st.player.as_mut().map(|p| p.tick());
             if let Some(s) = snapshot {
                 apply_snapshot(&mut st, &ui, &s);
             }
+            if ui.get_show_debug() {
+                if let Some(p) = st.player.as_ref() {
+                    ui.set_debug_text(p.diagnostics().into());
+                }
+            }
         }
     });
 
-    ui.run()
+    // `run_event_loop_until_quit` mantiene la aplicación viva con la ventana
+    // oculta (bandeja); sale con `quit_event_loop`.
+    ui.show()?;
+    slint::run_event_loop_until_quit()
 }

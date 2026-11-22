@@ -260,8 +260,16 @@ impl Player {
         self.pending_start = None;
     }
 
+    /// Estado interno del motor de audio, para depuración.
+    pub fn diagnostics(&self) -> String {
+        self.engine.diagnostics()
+    }
+
     /// Procesa eventos del motor y devuelve el estado a mostrar.
     pub fn tick(&mut self) -> Snapshot {
+        if let Some(e) = self.engine.take_stream_error() {
+            self.last_error = Some(format!("Audio: {e}"));
+        }
         for event in self.engine.poll() {
             match event {
                 Event::TrackStarted { id, duration_ms } => {

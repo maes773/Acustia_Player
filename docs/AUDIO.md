@@ -50,14 +50,33 @@ Límites de diseño conocidos:
 
 ## Conversión
 
-- **Frecuencia:** interpolación lineal por bloque, con estado entre bloques (sin discontinuidades).
-  Calidad básica; sustituible por `rubato` más adelante.
+- **Frecuencia:** filtro sinc con ventana Kaiser (β = 9, ≈ 90 dB de rechazo): 80 coeficientes por
+  muestra al subir de frecuencia (más al bajar), tabla polifásica de 512 fases con interpolación
+  lineal entre fases y cada fase normalizada a ganancia 1. Medido con un tono de 10 kHz de
+  44,1 → 48 kHz: error ≈ −15 dB con la interpolación lineal anterior (distorsión audible) frente a
+  < −100 dB ahora. Al terminar cada pista `finish()` vacía la cola del filtro (~40 muestras) para
+  que el empalme gapless no pierda el final.
 - **Canales:** mono → N duplica; N → mono promedia; otros casos copian canales comunes y rellenan o descartan.
 - **Formato de muestra de salida:** f32, i16 y u16.
 
 ## Volumen
 
 El control es lineal (0–1) en la interfaz y se aplica como ganancia **cuadrática** (`v²`).
+
+## Rampas anti-clic
+
+El callback no aplica la ganancia de golpe: se acerca a la deseada con una rampa de ~12 ms por
+muestra. Así **pausar, reanudar, mover el volumen y cambiar de pista o hacer seek** no producen
+saltos de señal. En un cambio de pista se baja primero a cero y solo entonces se descarta el audio
+viejo (`flush`). Tras cada carga el callback espera 60 ms de audio acumulado (*pre-roll*) antes de
+sonar. Con el comportamiento anterior, estas acciones producían saltos de hasta media escala.
+
+El callback además limita la salida a ±1,0 antes de convertir al formato del dispositivo.
+
+## Prioridades de hilo
+
+El hilo decodificador pide prioridad alta y el de escaneo de la biblioteca prioridad baja (si el
+sistema no lo permite, se ignora). Para el diagnóstico, `underruns` cuenta solo los cortes reales.
 
 ## Portabilidad a Android
 

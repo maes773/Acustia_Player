@@ -49,6 +49,22 @@ pub(crate) struct Shared {
     pub boundaries: Mutex<VecDeque<Boundary>>,
     /// Pista que se encadena (gapless) cuando termina la actual.
     pub next_slot: Mutex<Option<TrackRequest>>,
+
+    // --- Diagnóstico (contadores baratos, solo atómicos en el callback) ---
+    /// Veces que CPAL ha llamado al callback.
+    pub callbacks: AtomicU64,
+    /// Callbacks en los que faltaron muestras mientras se reproducía
+    /// (no cuenta el silencio normal tras el final de la última pista).
+    pub underruns: AtomicU64,
+    /// `true` desde que se pide cargar una pista hasta que el decodificador
+    /// escribe el fin de flujo: permite distinguir un corte real del silencio final.
+    pub streaming: AtomicBool,
+    /// Fotogramas decodificados y empujados al ring buffer (acumulado).
+    pub pushed_total: AtomicU64,
+    /// Muestras que hay ahora mismo en el ring buffer.
+    pub ring_fill: AtomicU64,
+    /// Último error notificado por el stream de CPAL (no en tiempo real).
+    pub stream_error: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -62,6 +78,12 @@ impl Shared {
             epoch: AtomicU64::new(0),
             boundaries: Mutex::new(VecDeque::new()),
             next_slot: Mutex::new(None),
+            callbacks: AtomicU64::new(0),
+            underruns: AtomicU64::new(0),
+            streaming: AtomicBool::new(false),
+            pushed_total: AtomicU64::new(0),
+            ring_fill: AtomicU64::new(0),
+            stream_error: Mutex::new(None),
         }
     }
 }
