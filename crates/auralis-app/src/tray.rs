@@ -13,7 +13,9 @@ pub enum TrayAction {
 mod imp {
     use super::TrayAction;
     use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-    use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+    use tray_icon::{
+        Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    };
 
     pub struct Tray {
         icon: TrayIcon,
@@ -44,7 +46,11 @@ mod imp {
         for y in 0..N {
             for x in 0..N {
                 let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-                let (r, g, b) = if d < 6.0 { (255, 255, 255) } else { (0x65, 0x77, 0xf5) };
+                let (r, g, b) = if d < 6.0 {
+                    (255, 255, 255)
+                } else {
+                    (0x65, 0x77, 0xf5)
+                };
                 // Borde suavizado de 1 px.
                 let a = ((15.5 - d).clamp(0.0, 1.0) * 255.0) as u8;
                 rgba.extend_from_slice(&[r, g, b, a]);

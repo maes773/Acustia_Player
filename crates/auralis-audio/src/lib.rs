@@ -19,6 +19,7 @@ mod decoder_thread;
 mod engine;
 mod error;
 mod output;
+mod platform;
 mod reader;
 mod shared;
 

@@ -65,6 +65,9 @@ pub(crate) struct Shared {
     pub ring_fill: AtomicU64,
     /// Último error notificado por el stream de CPAL (no en tiempo real).
     pub stream_error: Mutex<Option<String>>,
+    /// El stream de CPAL informó de un error (p. ej. se desconectaron los auriculares):
+    /// el motor debe volver a abrirse sobre el dispositivo predeterminado.
+    pub stream_lost: AtomicBool,
 }
 
 impl Shared {
@@ -84,6 +87,7 @@ impl Shared {
             pushed_total: AtomicU64::new(0),
             ring_fill: AtomicU64::new(0),
             stream_error: Mutex::new(None),
+            stream_lost: AtomicBool::new(false),
         }
     }
 }

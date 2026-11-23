@@ -47,7 +47,12 @@ pub struct Player {
     last_error: Option<String>,
     /// Saltos consecutivos por error; evita bucles si toda la lista falla.
     error_skips: usize,
+    /// Ticks desde la última comprobación del dispositivo de salida.
+    device_ticks: u32,
 }
+
+/// Cada cuántos `tick()` (≈100 ms) se comprueba si cambió el dispositivo de salida.
+const DEVICE_CHECK_TICKS: u32 = 10;
 
 impl Player {
     pub fn new() -> Result<Self, AudioError> {
@@ -63,6 +68,7 @@ impl Player {
             pending_start: None,
             last_error: None,
             error_skips: 0,
+            device_ticks: 0,
         };
         player.engine.set_volume(player.volume);
         Ok(player)
@@ -265,10 +271,44 @@ impl Player {
         self.engine.diagnostics()
     }
 
+    /// Si el dispositivo de salida predeterminado cambió (se conectaron o quitaron
+    /// unos auriculares) o el stream murió, abre un motor nuevo sobre el dispositivo
+    /// actual y retoma la pista por donde iba, conservando pausa/reproducción.
+    fn reopen_output_if_needed(&mut self) {
+        if !self.engine.needs_reopen() {
+            return;
+        }
+        // Si no se puede abrir (p. ej. no queda ningún dispositivo), se conserva el
+        // motor actual y se reintenta en la siguiente comprobación.
+        let Ok(new_engine) = Engine::new() else { return };
+        let position = self.position_ms();
+        new_engine.set_volume(self.volume);
+        let name = new_engine.device_name().to_string();
+        // El motor anterior se destruye aquí (su hilo y su stream se cierran).
+        self.engine = new_engine;
+        match (self.current, self.status) {
+            (Some(index), Status::Playing | Status::Paused) => {
+                if let Some(req) = self.request(index) {
+                    let autoplay = self.status == Status::Playing;
+                    self.pending_start = Some(position);
+                    self.engine.load(req, position, autoplay);
+                    self.refresh_next();
+                }
+            }
+            _ => self.refresh_next(),
+        }
+        self.last_error = Some(format!("Salida de audio: {name}"));
+    }
+
     /// Procesa eventos del motor y devuelve el estado a mostrar.
     pub fn tick(&mut self) -> Snapshot {
         if let Some(e) = self.engine.take_stream_error() {
             self.last_error = Some(format!("Audio: {e}"));
+        }
+        self.device_ticks += 1;
+        if self.device_ticks >= DEVICE_CHECK_TICKS {
+            self.device_ticks = 0;
+            self.reopen_output_if_needed();
         }
         for event in self.engine.poll() {
             match event {

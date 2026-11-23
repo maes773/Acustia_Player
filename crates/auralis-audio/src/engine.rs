@@ -90,6 +90,25 @@ impl Engine {
         self.shared.stream_error.lock().ok().and_then(|mut s| s.take())
     }
 
+    /// Nombre del dispositivo por el que está sonando.
+    pub fn device_name(&self) -> &str {
+        &self.output.device_name
+    }
+
+    /// `true` si el stream falló (dispositivo desconectado) o si el dispositivo
+    /// predeterminado del sistema ya no es el que estamos usando (p. ej. se
+    /// conectaron o quitaron los auriculares). Entonces hay que crear un `Engine` nuevo.
+    /// Consulta al sistema: llamar como mucho una vez por segundo.
+    pub fn needs_reopen(&self) -> bool {
+        if self.shared.stream_lost.load(Ordering::Relaxed) {
+            return true;
+        }
+        match output::default_device_name() {
+            Some(name) => name != self.output.device_name,
+            None => false, // sin dispositivos: se mantiene hasta que aparezca uno
+        }
+    }
+
     /// Resumen del estado interno para depuración (se muestra en la interfaz).
     pub fn diagnostics(&self) -> String {
         let s = &self.shared;

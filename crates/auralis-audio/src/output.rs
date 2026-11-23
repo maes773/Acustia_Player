@@ -21,12 +21,19 @@ pub struct Output {
 }
 
 /// Segundos de audio que el decodificador puede adelantar al ring buffer.
-const RING_SECONDS: usize = 1;
+const RING_SECONDS: usize = 2;
 /// Tras cargar una pista, el callback espera a tener este audio acumulado
 /// antes de empezar a sonar (evita arrancar con un bloque a medias).
 const PREROLL_MS: usize = 60;
 /// Duración de las rampas de ganancia (pausa, reanudar, volumen, cambio de pista).
 const RAMP_MS: f32 = 12.0;
+
+/// Nombre del dispositivo de salida predeterminado ahora mismo (`None` si no hay ninguno).
+pub fn default_device_name() -> Option<String> {
+    cpal::default_host()
+        .default_output_device()
+        .and_then(|d| d.name().ok())
+}
 
 pub fn open(shared: Arc<Shared>) -> Result<(Output, HeapProd<f32>), AudioError> {
     let host = cpal::default_host();
@@ -157,6 +164,7 @@ where
     // Los errores del stream se guardan para mostrarlos en la interfaz
     // (en release no hay consola donde verlos).
     let on_error = move |e: cpal::StreamError| {
+        err_shared.stream_lost.store(true, Ordering::Relaxed);
         if let Ok(mut slot) = err_shared.stream_error.lock() {
             *slot = Some(e.to_string());
         }

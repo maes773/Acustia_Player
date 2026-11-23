@@ -57,6 +57,7 @@ pub fn run(ctx: Ctx, rx: Receiver<Cmd>) {
     // Prioridad alta: este hilo no debe quedarse sin CPU frente a la interfaz
     // o al escaneo de la biblioteca. Si el sistema no lo permite, se sigue igual.
     let _ = set_current_thread_priority(ThreadPriority::Max);
+    crate::platform::register_audio_thread();
     let mut st = State {
         ctx,
         epoch: 0,

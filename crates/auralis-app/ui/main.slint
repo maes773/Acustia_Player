@@ -2,9 +2,11 @@
 // Neumorfismo: superficies del mismo color que el fondo, con una sombra clara
 // arriba-izquierda y otra oscura abajo-derecha. Slint admite una sola sombra
 // por elemento, así que se anidan dos rectángulos (ver NeuRaised).
+
 import { ListView } from "std-widgets.slint";
 
 export global Theme {
+    // false = tema claro (blanco), true = tema oscuro (negro).
     in-out property <bool> dark: false;
 
     out property <color> bg: dark ? #2a2e38 : #e4e8ef;
@@ -21,12 +23,26 @@ export global Theme {
 }
 
 export struct TrackItem {
+    // Posición de la canción en su carpeta (con la búsqueda activa la lista
+    // mostrada es un subconjunto, así que no coincide con la fila).
+    index: int,
     title: string,
     subtitle: string,
     duration: string,
     cover: image,
     has-cover: bool,
     current: bool,
+    // El usuario le cambió el nombre (solo se ve en la app; el archivo no se toca).
+    edited: bool,
+}
+
+export struct FolderItem {
+    name: string,
+    count: int,
+    // La reproducción en curso viene de esta carpeta.
+    playing: bool,
+    // La carpeta ya no existe en el disco.
+    missing: bool,
 }
 
 // Superficie en relieve.
@@ -41,9 +57,6 @@ component NeuRaised inherits Rectangle {
     drop-shadow-offset-y: -root.depth;
 
     Rectangle {
-        // FIX: el rectángulo interno debe rellenar el NeuRaised
-        width: parent.width;
-        height: parent.height;
         background: Theme.bg;
         border-radius: root.radius;
         drop-shadow-color: Theme.shadow;
@@ -72,18 +85,12 @@ component NeuButton inherits Rectangle {
     height: root.size;
 
     NeuRaised {
-        // FIX: que el NeuRaised ocupe todo el botón
-        width: parent.width;
-        height: parent.height;
         radius: root.size / 2;
         depth: (ta.pressed || root.active) ? 2px : 6px;
         @children
     }
 
     ta := TouchArea {
-        // FIX: sin tamaño el TouchArea mide 0×0 y no recibe clics
-        width: parent.width;
-        height: parent.height;
         clicked => {
             root.clicked();
         }
@@ -98,15 +105,9 @@ component NeuPill inherits Rectangle {
     min-width: 150px;
 
     NeuRaised {
-        // FIX: NeuRaised debe rellenar el pill
-        width: parent.width;
-        height: parent.height;
         radius: 22px;
         depth: ta.pressed ? 2px : 5px;
         Text {
-            // FIX: sin tamaño el Text no se centra
-            width: parent.width;
-            height: parent.height;
             text: root.label;
             color: Theme.text;
             font-size: 14px;
@@ -117,9 +118,6 @@ component NeuPill inherits Rectangle {
     }
 
     ta := TouchArea {
-        // FIX
-        width: parent.width;
-        height: parent.height;
         clicked => {
             root.clicked();
         }
@@ -139,15 +137,11 @@ component NeuSlider inherits Rectangle {
     }
 
     NeuInset {
-        // FIX: sin width la pista mide 0 y no se ve
-        width: root.width;
         y: (root.height - 10px) / 2;
         height: 10px;
         radius: 5px;
         Rectangle {
             x: 0px;
-            // FIX: el relleno necesita altura
-            height: parent.height;
             width: parent.width * max(0.0, min(1.0, root.value));
             border-radius: 5px;
             background: Theme.accent;
@@ -162,9 +156,6 @@ component NeuSlider inherits Rectangle {
         x: (root.width - self.width) * max(0.0, min(1.0, root.value));
         y: (root.height - self.height) / 2;
         Rectangle {
-            // FIX: centrar el punto del thumb
-            x: (parent.width - 8px) / 2;
-            y: (parent.height - 8px) / 2;
             width: 8px;
             height: 8px;
             border-radius: 4px;
@@ -173,9 +164,6 @@ component NeuSlider inherits Rectangle {
     }
 
     ta := TouchArea {
-        // FIX: sin tamaño no hay interacción
-        width: parent.width;
-        height: parent.height;
         pointer-event(e) => {
             if (e.button == PointerEventButton.left) {
                 if (e.kind == PointerEventKind.down) {
@@ -198,9 +186,17 @@ component NeuSlider inherits Rectangle {
 component TrackRow inherits Rectangle {
     in property <TrackItem> item;
     callback activated();
+    callback edit();
     height: 64px;
     border-radius: 14px;
     background: root.item.current ? Theme.row-current : (ta.has-hover ? Theme.row-hover : transparent);
+
+    // Va antes que el contenido para que el botón de editar quede por encima.
+    ta := TouchArea {
+        clicked => {
+            root.activated();
+        }
+    }
 
     HorizontalLayout {
         padding-left: 12px;
@@ -222,9 +218,6 @@ component TrackRow inherits Rectangle {
                 height: parent.height;
             }
             if !root.item.has-cover: Text {
-                // FIX: para centrar el glifo
-                width: parent.width;
-                height: parent.height;
                 text: "♪";
                 color: Theme.text-dim;
                 font-size: 20px;
@@ -258,14 +251,108 @@ component TrackRow inherits Rectangle {
             font-size: 13px;
             vertical-alignment: center;
         }
+
+        // Editar el nombre mostrado.
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 30px;
+                height: 30px;
+                border-radius: 15px;
+                background: edit-ta.has-hover ? Theme.row-current : transparent;
+                Path {
+                    x: (parent.width - 14px) / 2;
+                    y: (parent.height - 14px) / 2;
+                    width: 14px;
+                    height: 14px;
+                    viewbox-width: 14;
+                    viewbox-height: 14;
+                    commands: "M 1 13 L 1 10 L 10 1 L 13 4 L 4 13 Z M 8 3 L 11 6";
+                    stroke: root.item.edited ? Theme.accent : Theme.text-dim;
+                    stroke-width: 1.5px;
+                }
+                edit-ta := TouchArea {
+                    clicked => {
+                        root.edit();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Pestaña de una carpeta.
+component FolderChip inherits Rectangle {
+    in property <FolderItem> item;
+    in property <bool> selected;
+    callback activated();
+    callback removed();
+    width: 168px;
+    height: 44px;
+
+    if root.selected: NeuInset {
+        radius: 14px;
+    }
+    if !root.selected: NeuRaised {
+        radius: 14px;
+        depth: 3px;
     }
 
     ta := TouchArea {
-        // FIX: cubrir toda la fila
-        width: parent.width;
-        height: parent.height;
         clicked => {
             root.activated();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 4px;
+        spacing: 6px;
+        if root.item.playing: Text {
+            text: "♪";
+            color: Theme.accent;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+        if root.item.missing: Text {
+            text: "⚠";
+            color: Theme.text-dim;
+            font-size: 14px;
+            vertical-alignment: center;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.item.name;
+            color: root.selected ? Theme.accent : Theme.text;
+            font-size: 13px;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 28px;
+                height: 28px;
+                border-radius: 14px;
+                background: rm-ta.has-hover ? Theme.row-current : transparent;
+                Path {
+                    x: (parent.width - 10px) / 2;
+                    y: (parent.height - 10px) / 2;
+                    width: 10px;
+                    height: 10px;
+                    viewbox-width: 10;
+                    viewbox-height: 10;
+                    commands: "M 1 1 L 9 9 M 9 1 L 1 9";
+                    stroke: Theme.text-dim;
+                    stroke-width: 1.5px;
+                }
+                rm-ta := TouchArea {
+                    clicked => {
+                        root.removed();
+                    }
+                }
+            }
         }
     }
 }
@@ -279,8 +366,19 @@ export component MainWindow inherits Window {
     preferred-height: 680px;
     background: Theme.bg;
 
+    // --- Datos (los rellena Rust) ---
     in property <[TrackItem]> tracks;
     in property <string> folder-name: "Ninguna carpeta seleccionada";
+    in property <[FolderItem]> folders;
+    in property <int> selected-folder: 0;
+    // Texto que se muestra cuando la lista está vacía (leyendo, sin resultados…).
+    in property <string> empty-text: "Añade una carpeta para ver tu música";
+    in-out property <string> search-text;
+    // Diálogo para editar el nombre de una canción.
+    in-out property <bool> editing: false;
+    in-out property <string> edit-text;
+    in property <string> edit-original;
+    in property <bool> edit-has-custom: false;
     in property <string> status-message;
     in property <string> current-title: "Auralis";
     in property <string> current-artist: "Abre una carpeta con música";
@@ -292,12 +390,21 @@ export component MainWindow inherits Window {
     in-out property <float> volume: 0.8;
     in property <bool> playing: false;
     in property <bool> shuffle: false;
-    in property <int> repeat-mode: 0;
+    in property <int> repeat-mode: 0; // 0 = desactivado, 1 = toda la lista, 2 = una canción
     out property <bool> dragging: seek.dragging;
+    // Diagnóstico del audio: clic en la línea de estado para alternar.
     in property <string> debug-text;
     in-out property <bool> show-debug: false;
 
+    // --- Eventos hacia Rust ---
     callback pick-folder();
+    callback select-folder(int);
+    callback remove-folder(int);
+    callback search-changed(string);
+    callback edit-track(int);
+    callback rename-confirmed(string);
+    callback rename-reset();
+    callback theme-changed(bool);
     callback minimize-to-tray();
     callback play-index(int);
     callback toggle-play();
@@ -340,9 +447,6 @@ export component MainWindow inherits Window {
                             height: parent.height;
                         }
                         if !root.has-cover: Text {
-                            // FIX: centrar el placeholder
-                            width: parent.width;
-                            height: parent.height;
                             text: "♪";
                             color: Theme.text-dim;
                             font-size: 84px;
@@ -497,7 +601,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Repetir
+                // Repetir (desactivado / toda la lista / una canción)
                 NeuButton {
                     size: 46px;
                     active: root.repeat-mode != 0;
@@ -533,9 +637,6 @@ export component MainWindow inherits Window {
                             font-weight: 800;
                             horizontal-alignment: center;
                             vertical-alignment: center;
-                            // FIX: para centrar dentro del icono
-                            width: parent.width;
-                            height: parent.height;
                         }
                     }
                 }
@@ -548,6 +649,7 @@ export component MainWindow inherits Window {
                 Path {
                     width: 18px;
                     height: 16px;
+                    y: 4px;
                     viewbox-width: 18;
                     viewbox-height: 16;
                     commands: "M 0 5 L 4 5 L 9 0 L 9 16 L 4 11 L 0 11 Z M 12 4 C 14.5 6.5 14.5 9.5 12 12";
@@ -590,17 +692,18 @@ export component MainWindow inherits Window {
                     }
                 }
                 NeuPill {
-                    label: "Abrir carpeta";
+                    label: "Añadir carpeta";
                     clicked => {
                         root.pick-folder();
                     }
                 }
 
-                // Tema claro / oscuro
+                // Tema claro / oscuro: muestra una luna en claro y un sol en oscuro.
                 NeuButton {
                     size: 44px;
                     clicked => {
                         Theme.dark = !Theme.dark;
+                        root.theme-changed(Theme.dark);
                     }
                     if !Theme.dark: Path {
                         x: (parent.width - 18px) / 2;
@@ -626,7 +729,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                // Minimizar a la bandeja
+                // Minimizar a la bandeja del sistema.
                 NeuButton {
                     size: 44px;
                     clicked => {
@@ -646,15 +749,92 @@ export component MainWindow inherits Window {
                 }
             }
 
+            // Carpetas: una pestaña por carpeta, la reproducción se alterna entre ellas.
+            if root.folders.length > 0: Flickable {
+                height: 50px;
+                viewport-width: root.folders.length * 176px;
+                for folder[i] in root.folders: FolderChip {
+                    x: i * 176px;
+                    y: 3px;
+                    item: folder;
+                    selected: i == root.selected-folder;
+                    activated => {
+                        root.select-folder(i);
+                    }
+                    removed => {
+                        root.remove-folder(i);
+                    }
+                }
+            }
+
+            // Búsqueda.
+            NeuInset {
+                height: 42px;
+                radius: 21px;
+                Path {
+                    x: 16px;
+                    y: (parent.height - 16px) / 2;
+                    width: 16px;
+                    height: 16px;
+                    viewbox-width: 16;
+                    viewbox-height: 16;
+                    commands: "M 6.5 1.5 A 5 5 0 1 1 6.5 11.5 A 5 5 0 1 1 6.5 1.5 Z M 10.5 10.5 L 15 15";
+                    stroke: Theme.text-dim;
+                    stroke-width: 1.8px;
+                }
+                if root.search-text == "": Text {
+                    x: 44px;
+                    width: parent.width - 90px;
+                    text: "Buscar canciones…";
+                    color: Theme.text-dim;
+                    font-size: 14px;
+                    vertical-alignment: center;
+                }
+                search-input := TextInput {
+                    x: 44px;
+                    y: (parent.height - self.preferred-height) / 2;
+                    width: parent.width - 90px;
+                    text <=> root.search-text;
+                    color: Theme.text;
+                    font-size: 14px;
+                    single-line: true;
+                    edited => {
+                        root.search-changed(self.text);
+                    }
+                }
+                if root.search-text != "": Rectangle {
+                    x: parent.width - 38px;
+                    y: (parent.height - 28px) / 2;
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 14px;
+                    background: clear-ta.has-hover ? Theme.row-current : transparent;
+                    Path {
+                        x: (parent.width - 10px) / 2;
+                        y: (parent.height - 10px) / 2;
+                        width: 10px;
+                        height: 10px;
+                        viewbox-width: 10;
+                        viewbox-height: 10;
+                        commands: "M 1 1 L 9 9 M 9 1 L 1 9";
+                        stroke: Theme.text-dim;
+                        stroke-width: 1.5px;
+                    }
+                    clear-ta := TouchArea {
+                        clicked => {
+                            root.search-text = "";
+                            root.search-changed("");
+                        }
+                    }
+                }
+            }
+
             NeuInset {
                 vertical-stretch: 1;
                 radius: 22px;
 
                 if root.tracks.length == 0: Text {
-                    // FIX: centrar en el área
-                    width: parent.width;
-                    height: parent.height;
-                    text: "Elige una carpeta para ver tu música";
+                    text: root.empty-text;
                     color: Theme.text-dim;
                     font-size: 15px;
                     horizontal-alignment: center;
@@ -665,11 +845,13 @@ export component MainWindow inherits Window {
                     y: 10px;
                     width: parent.width - 20px;
                     height: parent.height - 20px;
-
-                    for track[index] in root.tracks: TrackRow {
+                    for track in root.tracks: TrackRow {
                         item: track;
                         activated => {
-                            root.play-index(index);
+                            root.play-index(track.index);
+                        }
+                        edit => {
+                            root.edit-track(track.index);
                         }
                     }
                 }
@@ -684,11 +866,101 @@ export component MainWindow inherits Window {
                     overflow: elide;
                 }
                 TouchArea {
-                    // FIX
-                    width: parent.width;
-                    height: parent.height;
                     clicked => {
                         root.show-debug = !root.show-debug;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------- Editar nombre de una canción ----------
+    if root.editing: Rectangle {
+        width: root.width;
+        height: root.height;
+        background: #00000066;
+        // Absorbe los clics para que no lleguen a la lista de debajo.
+        TouchArea {}
+
+        NeuRaised {
+            width: min(460px, parent.width - 48px);
+            height: 250px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            radius: 24px;
+            depth: 8px;
+
+            VerticalLayout {
+                padding: 26px;
+                spacing: 12px;
+                Text {
+                    text: "Editar nombre";
+                    color: Theme.text;
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: "Solo cambia cómo se muestra en Auralis. El archivo no se modifica. Original: " + root.edit-original;
+                    color: Theme.text-dim;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                NeuInset {
+                    height: 44px;
+                    radius: 14px;
+                    name-input := TextInput {
+                        x: 14px;
+                        y: (parent.height - self.preferred-height) / 2;
+                        width: parent.width - 28px;
+                        text <=> root.edit-text;
+                        color: Theme.text;
+                        font-size: 15px;
+                        single-line: true;
+                        init => {
+                            self.focus();
+                            self.select-all();
+                        }
+                        accepted => {
+                            root.editing = false;
+                            root.rename-confirmed(self.text);
+                        }
+                        key-pressed(e) => {
+                            if (e.text == Key.Escape) {
+                                root.editing = false;
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    alignment: end;
+                    if root.edit-has-custom: NeuPill {
+                        label: "Restaurar";
+                        min-width: 110px;
+                        clicked => {
+                            root.editing = false;
+                            root.rename-reset();
+                        }
+                    }
+                    NeuPill {
+                        label: "Cancelar";
+                        min-width: 110px;
+                        clicked => {
+                            root.editing = false;
+                        }
+                    }
+                    NeuPill {
+                        label: "Guardar";
+                        min-width: 110px;
+                        clicked => {
+                            root.editing = false;
+                            root.rename-confirmed(root.edit-text);
+                        }
                     }
                 }
             }

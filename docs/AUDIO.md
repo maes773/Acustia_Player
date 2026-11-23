@@ -3,7 +3,7 @@
 ## Flujo
 
 ```
-UI ──Cmd──▶ hilo decodificador ──f32──▶ ring buffer (1 s) ──▶ callback CPAL
+UI ──Cmd──▶ hilo decodificador ──f32──▶ ring buffer (2 s) ──▶ callback CPAL
  ▲            Symphonia + Converter        ringbuf (SPSC)        (tiempo real)
  └── Engine::poll(): posición (atómico) y eventos ◀──────────────────┘
 ```
@@ -44,7 +44,7 @@ cuando el formato lo informa.
 Límites de diseño conocidos:
 
 - La pista siguiente se fija cuando la actual **empieza a sonar**; cambiar shuffle/repeat en la
-  ventana de ~1 s en que el decodificador ya la tomó no la afecta.
+  ventana de ~2 s en que el decodificador ya la tomó no la afecta.
 - Si la pista encadenada falla al abrirse, el decodificador cierra el flujo (`End`) y el controlador
   salta a la siguiente; puede cortarse el final (≤ 1 s) de la pista anterior.
 
@@ -83,3 +83,37 @@ sistema no lo permite, se ignora). Para el diagnóstico, `underruns` cuenta solo
 `auralis-audio` depende de Symphonia y CPAL, ambos sin APIs de Windows. CPAL admite Android
 (requiere el backend correspondiente y comprobar el comportamiento del callback allí). `Engine`
 no es `Send` porque el `Stream` de CPAL no lo es: debe crearse y usarse desde un único hilo.
+
+## Varias carpetas y cola
+
+El reproductor (`auralis-player`) tiene una sola cola: la de la carpeta que suena. Al tocar una canción
+de otra carpeta la app llama a `set_tracks` con esa carpeta y empieza en la canción elegida; la cola
+anterior (y su shuffle) se descarta. Es un cambio manual de pista, por lo que usa el mismo flush con
+rampa anti-clic que cualquier cambio de pista. Los nombres editados solo existen en la interfaz: el
+motor sigue usando la ruta real del archivo.
+
+## Cambio de dispositivo de salida
+
+El `Output` de CPAL queda atado al dispositivo con el que se abrió. Cada ~1 s `Player::tick` llama a
+`Engine::needs_reopen()`, que es `true` si el callback de error del stream se disparó (`stream_lost`) o si
+el nombre del dispositivo predeterminado del sistema difiere del que usamos. Entonces se crea un `Engine`
+nuevo (nueva frecuencia/canales, nuevo ring buffer y decodificador), se reaplica el volumen, se recarga la
+pista actual en la posición donde iba (`load(req, pos, autoplay)`) y se destruye el anterior. Si el motor
+nuevo no se puede abrir, se conserva el viejo y se reintenta. Limitación: se compara el nombre del
+dispositivo; dos dispositivos con el mismo nombre no se distinguen.
+
+## Segundo plano / bandeja (Windows)
+
+Con la ventana oculta o minimizada, Windows 10/11 puede tratar el proceso como «de segundo plano»
+(EcoQoS): lo mueve a núcleos de bajo consumo, baja su frecuencia e ignora la resolución del temporizador.
+El hilo decodificador (que además remuestrea con el filtro sinc) se retrasa, el ring buffer se vacía y el
+callback rellena con silencio: se oye como chasquidos o cortes. Medidas (hipótesis sin medir en un equipo real):
+
+- `power.rs` (app) llama a `SetProcessInformation(ProcessPowerThrottling)` pidiendo no ser limitado
+  (velocidad de ejecución y resolución del temporizador).
+- El hilo decodificador se registra en MMCSS («Pro Audio», `avrt.dll` cargada dinámicamente).
+- El ring buffer pasa de 1 s a 2 s para tolerar más retraso. Efecto secundario: la ventana en que
+  cambiar shuffle/repeat no afecta a la pista ya encadenada crece hasta ~2 s.
+
+Para comprobarlo: pulsa la línea de estado (diagnóstico) y mira `underruns` antes y después de pasar un
+rato en la bandeja; si sigue subiendo, el problema es otro.
