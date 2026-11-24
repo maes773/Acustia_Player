@@ -1,10 +1,9 @@
-// Auralis v0.0.1 Alpha — interfaz neumórfica.
+// Acustia Player v0.0.1 Alpha — interfaz neumórfica.
 // Neumorfismo: superficies del mismo color que el fondo, con una sombra clara
 // arriba-izquierda y otra oscura abajo-derecha. Slint admite una sola sombra
 // por elemento, así que se anidan dos rectángulos (ver NeuRaised).
-
+import { Button, CheckBox, LineEdit, ComboBox } from "std-widgets.slint";
 import { ListView } from "std-widgets.slint";
-
 export global Theme {
     // false = tema claro (blanco), true = tema oscuro (negro).
     in-out property <bool> dark: false;
@@ -168,6 +167,165 @@ component MiniButton inherits Rectangle {
             horizontal-alignment: center;
             vertical-alignment: center;
         }
+    }
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// CD neumórfico: gira mientras `spinning` y muestra la carátula como etiqueta del disco.
+component SpinningDisc inherits Rectangle {
+    in property <image> cover;
+    in property <bool> has-cover;
+    in property <bool> spinning;
+    property <angle> angle: 0deg;
+    width: 270px;
+    height: 270px;
+
+    // ~73°/s (una vuelta cada 5 s) a 30 fotogramas por segundo, solo mientras suena.
+    Timer {
+        interval: 33ms;
+        running: root.spinning;
+        triggered => {
+            root.angle = root.angle + 2.4deg;
+            if (root.angle >= 360deg) {
+                root.angle = root.angle - 360deg;
+            }
+        }
+    }
+
+    // Relieve neumórfico circular.
+    NeuRaised {
+        radius: root.width / 2;
+        depth: 10px;
+
+        // Disco (recortado en círculo).
+        Rectangle {
+            x: 14px;
+            y: 14px;
+            width: parent.width - 28px;
+            height: parent.height - 28px;
+            border-radius: self.width / 2;
+            clip: true;
+            background: Theme.inset-top;
+
+            // Sin carátula: disco plateado (asimétrico para que se vea el giro).
+if !root.has-cover: Image {
+    source: @image-url("../assets/disc-blank.png");
+    image-fit: ImageFit.cover;
+    width: parent.width;
+    height: parent.height;
+    transform-rotation: root.angle;
+}
+            if root.has-cover: Image {
+                source: root.cover;
+                image-fit: ImageFit.cover;
+                width: parent.width;
+                height: parent.height;
+                transform-rotation: root.angle;
+            }
+
+            // Capas fijas (no giran): brillo de la luz y borde del disco.
+            Rectangle {
+                background: @linear-gradient(135deg, #ffffff40 0%, #ffffff00 38%, #00000000 62%, #00000030 100%);
+            }
+            Rectangle {
+                border-radius: self.width / 2;
+                border-width: 2px;
+                border-color: #ffffff33;
+            }
+            // Anillo interior de datos (el borde de la zona grabada).
+            Rectangle {
+                x: parent.width * 0.30;
+                y: parent.height * 0.30;
+                width: parent.width * 0.40;
+                height: parent.height * 0.40;
+                border-radius: self.width / 2;
+                border-width: 1px;
+                border-color: #ffffff2a;
+            }
+            // Cubo central con el agujero.
+            Rectangle {
+                x: (parent.width - 76px) / 2;
+                y: (parent.height - 76px) / 2;
+                width: 76px;
+                height: 76px;
+                border-radius: 38px;
+                background: @linear-gradient(135deg, Theme.light 0%, Theme.shadow 100%);
+                border-width: 2px;
+                border-color: #ffffff40;
+                Rectangle {
+                    x: (parent.width - 26px) / 2;
+                    y: (parent.height - 26px) / 2;
+                    width: 26px;
+                    height: 26px;
+                    border-radius: 13px;
+                    background: Theme.bg;
+                    border-width: 2px;
+                    border-color: #00000040;
+                }
+            }
+        }
+    }
+}
+
+// Campo de texto con etiqueta.
+component NeuField inherits Rectangle {
+    in property <string> label;
+    in-out property <string> value;
+    in property <bool> disabled: false;
+    callback accepted();
+    callback escaped();
+    height: 58px;
+
+    VerticalLayout {
+        spacing: 3px;
+        Text {
+            text: root.label;
+            color: Theme.text-dim;
+            font-size: 11px;
+        }
+        NeuInset {
+            height: 36px;
+            radius: 12px;
+            TextInput {
+                x: 12px;
+                y: (parent.height - self.preferred-height) / 2;
+                width: parent.width - 24px;
+                text <=> root.value;
+                read-only: root.disabled;
+                color: root.disabled ? Theme.text-dim : Theme.text;
+                font-size: 14px;
+                single-line: true;
+                accepted => {
+                    root.accepted();
+                }
+                key-pressed(e) => {
+                    if (e.text == Key.Escape) {
+                        root.escaped();
+                        return accept;
+                    }
+                    return reject;
+                }
+            }
+        }
+    }
+}
+
+// Botón de texto (enlace).
+component TextButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    height: 26px;
+    Text {
+        text: root.label;
+        color: ta.has-hover ? Theme.accent : Theme.text-dim;
+        font-size: 12px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
     }
     ta := TouchArea {
         clicked => {
@@ -410,7 +568,7 @@ component FolderChip inherits Rectangle {
 }
 
 export component MainWindow inherits Window {
-    title: "Auralis";
+    title: "Acustia Player";
     icon: @image-url("../assets/icon-256.png");
     min-width: 880px;
     min-height: 600px;
@@ -426,13 +584,21 @@ export component MainWindow inherits Window {
     // Texto que se muestra cuando la lista está vacía (leyendo, sin resultados…).
     in property <string> empty-text: "Añade una carpeta para ver tu música";
     in-out property <string> search-text;
-    // Diálogo para editar el nombre de una canción.
+    // Diálogo para editar los metadatos de una canción.
     in-out property <bool> editing: false;
-    in-out property <string> edit-text;
-    in property <string> edit-original;
-    in property <bool> edit-has-custom: false;
+    in property <string> edit-file;
+    in-out property <string> edit-title;
+    in-out property <string> edit-artist;
+    in-out property <string> edit-album;
+    in-out property <string> edit-genre;
+    in-out property <string> edit-year;
+    in property <image> edit-cover;
+    in property <bool> edit-has-cover: false;
+    // Leyendo o guardando: los campos no se pueden tocar.
+    in property <bool> edit-busy: false;
+    in property <string> edit-error;
     in property <string> status-message;
-    in property <string> current-title: "Auralis";
+    in property <string> current-title: "Acustia Player";
     in property <string> current-artist: "Abre una carpeta con música";
     in property <image> current-cover;
     in property <bool> has-cover: false;
@@ -457,8 +623,11 @@ export component MainWindow inherits Window {
     callback remove-folder(int);
     callback search-changed(string);
     callback edit-track(int);
-    callback rename-confirmed(string);
-    callback rename-reset();
+    callback edit-pick-cover();
+    callback edit-remove-cover();
+    callback edit-save();
+    callback edit-save-local();
+    callback edit-cancel();
     callback theme-changed(bool);
     callback minimize-to-tray();
     callback play-index(int);
@@ -484,33 +653,10 @@ export component MainWindow inherits Window {
 
             HorizontalLayout {
                 alignment: center;
-                NeuRaised {
-                    width: 270px;
-                    height: 270px;
-                    radius: 30px;
-                    depth: 10px;
-                    Rectangle {
-                        x: 16px;
-                        y: 16px;
-                        width: parent.width - 32px;
-                        height: parent.height - 32px;
-                        border-radius: 20px;
-                        clip: true;
-                        background: @linear-gradient(135deg, Theme.inset-top 0%, Theme.inset-bottom 100%);
-                        if root.has-cover: Image {
-                            source: root.current-cover;
-                            image-fit: cover;
-                            width: parent.width;
-                            height: parent.height;
-                        }
-                        if !root.has-cover: Text {
-                            text: "♪";
-                            color: Theme.text-dim;
-                            font-size: 84px;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
+                SpinningDisc {
+                    cover: root.current-cover;
+                    has-cover: root.has-cover;
+                    spinning: root.playing;
                 }
             }
 
@@ -796,7 +942,7 @@ export component MainWindow inherits Window {
                     alignment: center;
                     spacing: 2px;
                     Text {
-                        text: "Auralis";
+                        text: "Acustia Player";
                         color: Theme.text;
                         font-size: 26px;
                         font-weight: 800;
@@ -869,7 +1015,7 @@ export component MainWindow inherits Window {
             // Carpetas: una pestaña por carpeta, la reproducción se alterna entre ellas.
             if root.folders.length > 0: Flickable {
                 height: 50px;
-                viewport-width: root.folders.length * 176px;
+                content-width: root.folders.length * 176px;
                 for folder[i] in root.folders: FolderChip {
                     x: i * 176px;
                     y: 3px;
@@ -991,7 +1137,7 @@ export component MainWindow inherits Window {
         }
     }
 
-    // ---------- Editar nombre de una canción ----------
+    // ---------- Editar metadatos de una canción ----------
     if root.editing: Rectangle {
         width: root.width;
         height: root.height;
@@ -1000,55 +1146,154 @@ export component MainWindow inherits Window {
         TouchArea {}
 
         NeuRaised {
-            width: min(460px, parent.width - 48px);
-            height: 250px;
+            width: min(540px, parent.width - 48px);
+            height: min(470px, parent.height - 32px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             radius: 24px;
             depth: 8px;
 
             VerticalLayout {
-                padding: 26px;
-                spacing: 12px;
+                padding: 24px;
+                spacing: 10px;
                 Text {
-                    text: "Editar nombre";
+                    text: "Editar metadatos";
                     color: Theme.text;
                     font-size: 18px;
                     font-weight: 700;
                 }
                 Text {
-                    text: "Solo cambia cómo se muestra en Auralis. El archivo no se modifica. Original: " + root.edit-original;
+                    text: root.edit-file;
                     color: Theme.text-dim;
                     font-size: 12px;
-                    wrap: word-wrap;
+                    overflow: elide;
                 }
-                NeuInset {
-                    height: 44px;
-                    radius: 14px;
-                    name-input := TextInput {
-                        x: 14px;
-                        y: (parent.height - self.preferred-height) / 2;
-                        width: parent.width - 28px;
-                        text <=> root.edit-text;
-                        color: Theme.text;
-                        font-size: 15px;
-                        single-line: true;
-                        init => {
-                            self.focus();
-                            self.select-all();
-                        }
-                        accepted => {
-                            root.editing = false;
-                            root.rename-confirmed(self.text);
-                        }
-                        key-pressed(e) => {
-                            if (e.text == Key.Escape) {
-                                root.editing = false;
-                                return accept;
+                HorizontalLayout {
+                    spacing: 18px;
+                    // Carátula
+                    VerticalLayout {
+                        width: 132px;
+                        spacing: 6px;
+                        alignment: start;
+                        NeuInset {
+                            width: 132px;
+                            height: 132px;
+                            radius: 16px;
+                            Rectangle {
+                                x: 4px;
+                                y: 4px;
+                                width: parent.width - 8px;
+                                height: parent.height - 8px;
+                                border-radius: 12px;
+                                clip: true;
+                                if root.edit-has-cover: Image {
+                                    source: root.edit-cover;
+                                    image-fit: cover;
+                                    width: parent.width;
+                                    height: parent.height;
+                                }
+                                if !root.edit-has-cover: Text {
+                                    text: "♪";
+                                    color: Theme.text-dim;
+                                    font-size: 48px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
                             }
-                            return reject;
+                        }
+                        TextButton {
+                            label: "Cambiar carátula…";
+                            clicked => {
+                                if (!root.edit-busy) {
+                                    root.edit-pick-cover();
+                                }
+                            }
+                        }
+                        if root.edit-has-cover: TextButton {
+                            label: "Quitar carátula";
+                            clicked => {
+                                if (!root.edit-busy) {
+                                    root.edit-remove-cover();
+                                }
+                            }
                         }
                     }
+                    // Campos
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 6px;
+                        NeuField {
+                            label: "Título";
+                            value <=> root.edit-title;
+                            disabled: root.edit-busy;
+                            accepted => {
+                                root.edit-save();
+                            }
+                            escaped => {
+                                root.editing = false;
+                                root.edit-cancel();
+                            }
+                        }
+                        NeuField {
+                            label: "Artista";
+                            value <=> root.edit-artist;
+                            disabled: root.edit-busy;
+                            accepted => {
+                                root.edit-save();
+                            }
+                            escaped => {
+                                root.editing = false;
+                                root.edit-cancel();
+                            }
+                        }
+                        NeuField {
+                            label: "Álbum";
+                            value <=> root.edit-album;
+                            disabled: root.edit-busy;
+                            accepted => {
+                                root.edit-save();
+                            }
+                            escaped => {
+                                root.editing = false;
+                                root.edit-cancel();
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            NeuField {
+                                horizontal-stretch: 1;
+                                label: "Género";
+                                value <=> root.edit-genre;
+                                disabled: root.edit-busy;
+                                accepted => {
+                                    root.edit-save();
+                                }
+                                escaped => {
+                                    root.editing = false;
+                                    root.edit-cancel();
+                                }
+                            }
+                            NeuField {
+                                width: 90px;
+                                label: "Año";
+                                value <=> root.edit-year;
+                                disabled: root.edit-busy;
+                                accepted => {
+                                    root.edit-save();
+                                }
+                                escaped => {
+                                    root.editing = false;
+                                    root.edit-cancel();
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: root.edit-error;
+                    color: #d9534f;
+                    font-size: 12px;
+                    wrap: word-wrap;
                 }
                 Rectangle {
                     vertical-stretch: 1;
@@ -1056,12 +1301,11 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     spacing: 10px;
                     alignment: end;
-                    if root.edit-has-custom: NeuPill {
-                        label: "Restaurar";
-                        min-width: 110px;
+                    if root.edit-error != "": NeuPill {
+                        label: "Solo en la app";
+                        min-width: 120px;
                         clicked => {
-                            root.editing = false;
-                            root.rename-reset();
+                            root.edit-save-local();
                         }
                     }
                     NeuPill {
@@ -1069,14 +1313,14 @@ export component MainWindow inherits Window {
                         min-width: 110px;
                         clicked => {
                             root.editing = false;
+                            root.edit-cancel();
                         }
                     }
                     NeuPill {
-                        label: "Guardar";
+                        label: root.edit-busy ? "Espere…" : "Guardar";
                         min-width: 110px;
                         clicked => {
-                            root.editing = false;
-                            root.rename-confirmed(root.edit-text);
+                            root.edit-save();
                         }
                     }
                 }

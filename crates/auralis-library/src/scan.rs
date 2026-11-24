@@ -20,7 +20,11 @@ const LIST_COVER_PX: u32 = 96;
 fn is_supported(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| SUPPORTED_EXTENSIONS.iter().any(|s| s.eq_ignore_ascii_case(e)))
+        .map(|e| {
+            SUPPORTED_EXTENSIONS
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(e))
+        })
         .unwrap_or(false)
 }
 
@@ -93,6 +97,31 @@ pub fn scan_folder(
         .expect("no se pudo crear el hilo de escaneo")
 }
 
+/// Lee las etiquetas de algunas pistas concretas (`(índice, ruta)`), p. ej. las que acaban
+/// de aparecer en la carpeta. Envía un `Meta` por pista y al final `Done`.
+pub fn scan_paths(
+    items: Vec<(usize, PathBuf)>,
+    tx: Sender<ScanEvent>,
+    cancel: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name("auralis-scan-new".into())
+        .spawn(move || {
+            let _ = set_current_thread_priority(ThreadPriority::Min);
+            for (index, path) in items {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let meta = read_metadata(&path, LIST_COVER_PX);
+                if tx.send(ScanEvent::Meta { index, meta }).is_err() {
+                    return;
+                }
+            }
+            let _ = tx.send(ScanEvent::Done);
+        })
+        .expect("no se pudo crear el hilo de escaneo")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,7 +138,12 @@ mod tests {
         let found = list_audio_files(&base).unwrap();
         let names: Vec<String> = found
             .iter()
-            .map(|p| p.strip_prefix(&base).unwrap().to_string_lossy().replace('\\', "/"))
+            .map(|p| {
+                p.strip_prefix(&base)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
             .collect();
         assert_eq!(names, vec!["A.FLAC", "b.mp3", "sub/c.ogg"]);
         fs::remove_dir_all(&base).unwrap();

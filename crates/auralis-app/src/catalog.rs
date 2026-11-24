@@ -2,6 +2,7 @@
 //! (probable sin ventana): nombres mostrados, nombres editados por el usuario y
 //! filtro de búsqueda.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use auralis_core::search::search_key;
@@ -14,6 +15,8 @@ pub struct Entry {
     /// Nombre elegido por el usuario. Solo cambia lo que se muestra; el archivo no se toca.
     custom_title: Option<String>,
     key: String,
+    /// Ya se leyeron las etiquetas de este archivo (las nuevas aún no).
+    pub meta_read: bool,
 }
 
 impl Entry {
@@ -22,6 +25,7 @@ impl Entry {
             info,
             custom_title,
             key: String::new(),
+            meta_read: false,
         };
         e.refresh_key();
         e
@@ -60,6 +64,7 @@ impl Entry {
         artist: Option<String>,
         duration_ms: Option<u64>,
     ) {
+        self.meta_read = true;
         if let Some(t) = title {
             self.info.title = t;
         }
@@ -69,6 +74,18 @@ impl Entry {
         if duration_ms.is_some() {
             self.info.duration_ms = duration_ms;
         }
+        self.refresh_key();
+    }
+
+    /// Etiquetas tras escribirlas en el archivo: sustituyen a las anteriores (un campo
+    /// vacío es un campo borrado, no «sin cambios») y el nombre editado solo en la app
+    /// deja de hacer falta.
+    pub fn reset_tags(&mut self, title: Option<String>, artist: Option<String>) {
+        self.meta_read = true;
+        self.info.title =
+            title.unwrap_or_else(|| TrackInfo::from_path(self.info.path.clone()).title);
+        self.info.artist = artist;
+        self.custom_title = None;
         self.refresh_key();
     }
 
@@ -147,6 +164,87 @@ impl Folder {
     }
 }
 
+/// Resultado de actualizar una carpeta con una lista de archivos nueva.
+pub struct SyncPlan {
+    /// Índice nuevo de cada canción que ya estaba (por su índice antiguo), o `None` si
+    /// el archivo desapareció.
+    pub old_to_new: Vec<Option<usize>>,
+    /// Índices nuevos de las canciones que no estaban antes.
+    pub added: Vec<usize>,
+}
+
+impl Folder {
+    /// Pone las canciones en el orden de `paths` conservando todo lo ya leído (etiquetas,
+    /// nombre editado) de las que siguen existiendo. Las nuevas se crean sin etiquetas.
+    pub fn sync_files(&mut self, paths: Vec<PathBuf>, settings: &Settings) -> SyncPlan {
+        let mut old: HashMap<PathBuf, (usize, Entry)> = self
+            .entries
+            .drain(..)
+            .enumerate()
+            .map(|(i, e)| (e.info.path.clone(), (i, e)))
+            .collect();
+        let mut old_to_new = vec![None; old.len()];
+        let mut added = Vec::new();
+        for (new_index, path) in paths.into_iter().enumerate() {
+            match old.remove(&path) {
+                Some((old_index, entry)) => {
+                    old_to_new[old_index] = Some(new_index);
+                    self.entries.push(entry);
+                }
+                None => {
+                    let info = TrackInfo::from_path(path);
+                    let custom = settings.title_for(&info.path).map(str::to_string);
+                    self.entries.push(Entry::new(info, custom));
+                    added.push(new_index);
+                }
+            }
+        }
+        SyncPlan { old_to_new, added }
+    }
+}
+
+/// Campos de texto del editor de metadatos.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetaForm {
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub genre: String,
+    pub year: String,
+}
+
+/// Campos que cambiaron (`Some(nuevo)`, vacío = borrar); `None` = sin cambios.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FormChanges {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<String>,
+}
+
+impl FormChanges {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl MetaForm {
+    /// Solo se escribe lo que realmente cambió (ignorando espacios sobrantes).
+    pub fn changes_from(&self, original: &MetaForm) -> FormChanges {
+        fn d(new: &str, old: &str) -> Option<String> {
+            (new.trim() != old.trim()).then(|| new.trim().to_string())
+        }
+        FormChanges {
+            title: d(&self.title, &original.title),
+            artist: d(&self.artist, &original.artist),
+            album: d(&self.album, &original.album),
+            genre: d(&self.genre, &original.genre),
+            year: d(&self.year, &original.year),
+        }
+    }
+}
+
 fn last_component(p: &Path) -> String {
     p.file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -202,6 +300,22 @@ mod tests {
         e.set_custom_title(None);
         assert_eq!(e.display_title(), "Intro (etiqueta)");
         assert!(!e.has_custom_title());
+    }
+
+    #[test]
+    fn reset_tags_replaces_values_and_drops_custom_title() {
+        let mut e = Entry::new(info("/m/a.mp3"), Some("Mi nombre".into()));
+        assert!(!e.meta_read);
+        e.apply_meta(Some("Vieja".into()), Some("Ana".into()), Some(9));
+        assert!(e.meta_read);
+        e.reset_tags(Some("Nueva".into()), None); // artista borrado
+        assert_eq!(e.display_title(), "Nueva");
+        assert_eq!(e.info.artist, None);
+        assert_eq!(e.info.duration_ms, Some(9));
+        assert!(!e.has_custom_title());
+        e.reset_tags(None, None); // sin título en el archivo: vuelve al nombre del archivo
+        assert_eq!(e.display_title(), "a");
+        assert!(e.matches(&Query::new("a.mp3")));
     }
 
     #[test]
@@ -291,6 +405,87 @@ mod tests {
             &Settings::default(),
         );
         assert_eq!(f.visible(&Query::new("rock")), vec![0, 2]);
+    }
+
+    fn folder_with(paths: &[&str]) -> Folder {
+        let mut f = Folder::new(1, PathBuf::from("/m"), "m".into());
+        f.set_files(
+            paths.iter().map(|p| info(p)).collect(),
+            &Settings::default(),
+        );
+        f
+    }
+
+    #[test]
+    fn sync_keeps_loaded_data_and_reports_added_and_removed() {
+        let mut f = folder_with(&["/m/a.mp3", "/m/c.mp3", "/m/d.mp3"]);
+        f.entries[1].apply_meta(Some("Cé".into()), Some("Artista".into()), Some(5));
+        f.entries[2].set_custom_title(Some("Mi d".into()));
+        // Llega b (nueva, en medio) y desaparece a.
+        let plan = f.sync_files(
+            ["/m/b.mp3", "/m/c.mp3", "/m/d.mp3"]
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            &Settings::default(),
+        );
+        assert_eq!(plan.old_to_new, vec![None, Some(1), Some(2)]);
+        assert_eq!(plan.added, vec![0]);
+        assert_eq!(f.entries.len(), 3);
+        assert_eq!(f.entries[1].display_title(), "Cé");
+        assert_eq!(f.entries[1].info.duration_ms, Some(5));
+        assert_eq!(f.entries[2].display_title(), "Mi d");
+        assert_eq!(f.entries[0].display_title(), "b");
+    }
+
+    #[test]
+    fn sync_with_no_changes_is_identity_and_new_files_get_saved_titles() {
+        let mut f = folder_with(&["/m/a.mp3", "/m/b.mp3"]);
+        let same = f.sync_files(
+            ["/m/a.mp3", "/m/b.mp3"].iter().map(PathBuf::from).collect(),
+            &Settings::default(),
+        );
+        assert_eq!(same.old_to_new, vec![Some(0), Some(1)]);
+        assert!(same.added.is_empty());
+        let mut settings = Settings::default();
+        settings.set_title(Path::new("/m/z.mp3"), Some("Z editada"));
+        let plan = f.sync_files(
+            ["/m/a.mp3", "/m/b.mp3", "/m/z.mp3"]
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
+            &settings,
+        );
+        assert_eq!(plan.added, vec![2]);
+        assert_eq!(f.entries[2].display_title(), "Z editada");
+        let empty = f.sync_files(Vec::new(), &settings);
+        assert_eq!(empty.old_to_new, vec![None, None, None]);
+        assert!(f.entries.is_empty());
+    }
+
+    #[test]
+    fn form_changes_only_include_modified_fields() {
+        let orig = MetaForm {
+            title: "Canción".into(),
+            artist: "Ana".into(),
+            album: "".into(),
+            genre: "Rock".into(),
+            year: "1999".into(),
+        };
+        assert!(orig.changes_from(&orig).is_empty());
+        let mut f = orig.clone();
+        f.artist = "  Ana  ".into(); // solo espacios: no cuenta
+        assert!(f.changes_from(&orig).is_empty());
+        f.title = " Otra ".into();
+        f.genre = "".into(); // borrar
+        f.album = "Disco".into();
+        f.year = "2001".into();
+        let c = f.changes_from(&orig);
+        assert_eq!(c.title.as_deref(), Some("Otra"));
+        assert_eq!(c.genre.as_deref(), Some(""));
+        assert_eq!(c.album.as_deref(), Some("Disco"));
+        assert_eq!(c.year.as_deref(), Some("2001"));
+        assert_eq!(c.artist, None);
     }
 
     #[test]

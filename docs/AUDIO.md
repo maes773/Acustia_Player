@@ -146,3 +146,13 @@ cancela cualquier mezcla. Con T = 0 se usa el empalme gapless de siempre.
 Límite: `next_slot` lo fija el controlador cuando la pista actual *suena*, ~2 s después de decodificarse
 su inicio (tamaño del ring buffer); para canciones de duración < T + ~2 s la mezcla de su final puede
 llegar tarde y reducirse o convertirse en un empalme sin mezcla.
+
+## Editar metadatos y carpetas vigiladas
+
+- La escritura de etiquetas (`auralis-library::tags`) nunca ocurre en el hilo de audio ni en el de la interfaz.
+  Si la canción editada es la que suena, el reproductor la pausa, la escritura termina y se reabre el archivo
+  en la misma posición (`seek_ms`), porque los desplazamientos que el lector guardó dejan de valer cuando
+  cambia el tamaño de las etiquetas.
+- Cuando la vigilancia detecta archivos nuevos/borrados, `Player::sync_tracks` sustituye la lista conservando
+  la canción actual (se busca por ruta); si el archivo que suena desaparece, la reproducción se detiene.
+- El disco giratorio es solo UI (un `Timer` de Slint que actualiza el ángulo mientras suena); no toca el motor.

@@ -150,6 +150,39 @@ impl Player {
         self.analyze_loudness_in_background();
     }
 
+    /// Sustituye la lista por una versión actualizada de la **misma** carpeta (se
+    /// añadieron o quitaron archivos) sin cortar lo que suena: la pista actual se
+    /// localiza por su ruta en la lista nueva y sigue por donde iba. Devuelve su índice
+    /// nuevo. Si la pista actual ya no está en la lista, la reproducción se detiene.
+    pub fn sync_tracks(&mut self, tracks: Vec<TrackInfo>) -> Option<usize> {
+        let new_index = self
+            .current
+            .and_then(|i| self.tracks.get(i))
+            .and_then(|cur| tracks.iter().position(|t| t.path == cur.path));
+        let Some(ni) = new_index else {
+            self.set_tracks(tracks);
+            return None;
+        };
+        let position = self.position_ms();
+        self.queue.reset(tracks.len());
+        self.queue.play_index(ni);
+        self.tracks = tracks;
+        self.current = Some(ni);
+        // Los identificadores de pista del motor son índices: lo que ya tenía encadenado
+        // quedó desactualizado. Se recarga la pista actual en su posición (un corte de
+        // pocos ms) para que todo vuelva a coincidir.
+        if matches!(self.status, Status::Playing | Status::Paused) {
+            if let Some(req) = self.request(ni) {
+                let autoplay = self.status == Status::Playing;
+                self.pending_start = Some(position);
+                self.engine.load(req, position, autoplay);
+            }
+        }
+        self.refresh_next();
+        self.analyze_loudness_in_background();
+        Some(ni)
+    }
+
     pub fn track(&self, index: usize) -> Option<&TrackInfo> {
         self.tracks.get(index)
     }

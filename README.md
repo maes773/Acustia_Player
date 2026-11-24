@@ -1,4 +1,4 @@
-# Auralis — v0.0.1 Alpha
+# Acustia Player — v0.0.1 Alpha (antes «Auralis»)
 
 Reproductor de música local para Windows, escrito en Rust con Slint (interfaz neumórfica),
 Symphonia (decodificación) y CPAL (salida de audio). Sin Electron ni Chromium.
@@ -27,7 +27,7 @@ pero la ejecución es más lenta; para escuchar música usa `--release`.
 
 - **Tema claro/oscuro:** botón de luna/sol en la cabecera (no se recuerda entre sesiones).
 - **Logo:** `crates/auralis-app/assets/` (`icon.svg` es el original; `icon.ico` y los PNG se generan
-  a partir de él). El `.ico` se incrusta en `auralis.exe` al compilar para Windows (requiere el
+  a partir de él). El `.ico` se incrusta en `acustia-player.exe` al compilar para Windows (requiere el
   Windows SDK, que incluyen las Build Tools de Visual Studio); los PNG se usan en la ventana y la bandeja.
 - **Bandeja del sistema (solo Windows):** botón ⌄ de la cabecera. Oculta la ventana y deja un
   icono; clic izquierdo restaura, clic derecho abre el menú (Mostrar, Reproducir/Pausar, Salir).
@@ -74,9 +74,12 @@ reutilizar `core`, `audio`, `library` y `player` con otra interfaz.
 ## Qué hace esta versión
 
 - **Varias carpetas** en listas separadas (una pestaña por carpeta, con el nombre de la carpeta; se numeran si coinciden). Se leen al abrirlas por primera vez. Tocar una canción de otra pestaña cambia la reproducción a esa carpeta (♪ marca la que suena); cambiar de pestaña sin tocar nada no interrumpe la música. La × de la pestaña quita la carpeta de la app (no borra archivos).
-- **Se guarda entre sesiones:** carpetas, carpeta seleccionada, modo oscuro y nombres editados, en `%APPDATA%\Auralis\settings.txt` (texto plano, escritura atómica). Si una carpeta ya no existe (disco desconectado) sigue en la lista marcada con ⚠ y se reintenta al seleccionarla.
-- **Editar el nombre de una canción** con el lápiz de cada fila: solo cambia cómo se ve en Auralis, el archivo no se toca. «Restaurar» vuelve al nombre original. Se guarda por ruta de archivo.
-- **Normalización de volumen** (interruptor «Normalizar volumen», activado por defecto): mide la sonoridad de cada canción (LUFS, norma EBU R128 / BS.1770) y la lleva a −14 LUFS (el nivel «Normal» de Spotify), de modo que no haya que subir o bajar el volumen entre canciones. La **barra de volumen sigue siendo el control maestro**: la normalización solo iguala el punto de partida de cada canción y nunca sube una canción más allá de −1 dBFS de pico (no genera distorsión). La primera vez que suena una canción se mide al vuelo con sus primeros 45 s; una medición completa se hace en segundo plano a baja prioridad y se guarda en `%APPDATA%\Auralis\loudness.txt`.
+- **Se guarda entre sesiones:** carpetas, carpeta seleccionada, modo oscuro y nombres editados, en `%APPDATA%\Acustia Player\settings.txt` (texto plano, escritura atómica). Si una carpeta ya no existe (disco desconectado) sigue en la lista marcada con ⚠ y se reintenta al seleccionarla.
+- **Editar metadatos** con el lápiz de cada fila: título, artista, álbum, género, año y **carátula** (elegir JPG/PNG o quitarla). Se **incrustan en el archivo** (ID3 en MP3/AIFF/WAV, Vorbis en FLAC/OGG) con `lofty`, en un hilo aparte, y solo se escribe lo que cambió. La carátula se guarda tal cual si es JPEG/PNG de ≤900 KB; si no, se reduce a ≤1000 px JPEG q85. Si se edita la canción que suena, se pausa un instante mientras se escribe y se reanuda en la misma posición. Si el archivo no se puede modificar (solo lectura, formato sin soporte de etiquetas), el botón «Solo en la app» guarda el nombre sin tocar el archivo.
+- **Detección automática de cambios en carpetas:** cada carpeta leída se vigila (sondeo cada 3 s, sin dependencias nativas). Las canciones nuevas aparecen solas y las borradas desaparecen; no se interrumpe la música ni se pierden nombres/carátulas. Se espera a que un archivo deje de crecer (1,5 s) antes de añadirlo, para no leer copias a medias. Una carpeta no disponible (disco desconectado) no se interpreta como vacía.
+- **Disco neumórfico giratorio** en el reproductor, con la carátula como etiqueta del CD; gira mientras suena y se detiene al pausar (disco plateado liso si no hay carátula).
+- **Renombrado a Acustia Player:** los ajustes de la versión anterior (`%APPDATA%\Auralis`) se copian automáticamente a `%APPDATA%\Acustia Player`.
+- **Normalización de volumen** (interruptor «Normalizar volumen», activado por defecto): mide la sonoridad de cada canción (LUFS, norma EBU R128 / BS.1770) y la lleva a −14 LUFS (el nivel «Normal» de Spotify), de modo que no haya que subir o bajar el volumen entre canciones. La **barra de volumen sigue siendo el control maestro**: la normalización solo iguala el punto de partida de cada canción y nunca sube una canción más allá de −1 dBFS de pico (no genera distorsión). La primera vez que suena una canción se mide al vuelo con sus primeros 45 s; una medición completa se hace en segundo plano a baja prioridad y se guarda en `%APPDATA%\Acustia Player\loudness.txt`.
 - **Crossfade configurable** (botones − / + , de 0 a 12 s; 0 = desactivado, que es el gapless de siempre): al final de cada canción la siguiente entra mientras la actual se desvanece (potencia constante). Solo en el cambio **automático** de canción; siguiente/anterior cambian al instante. Se guarda en los ajustes.
 - **Búsqueda** (sin distinguir mayúsculas ni acentos; todas las palabras deben aparecer, en cualquier orden) por nombre mostrado, nombre original, artista y nombre de archivo. Filtra solo la lista visible: no altera la cola de reproducción.
 - Lista con nombre, artista si hay etiqueta,
@@ -92,7 +95,7 @@ reutilizar `core`, `audio`, `library` y `player` con otra interfaz.
 - Si una pista no se puede abrir, se muestra el error y se salta a la siguiente.
 - Formatos: MP3, FLAC, WAV, OGG Vorbis, AIFF.
 
-Fuera de alcance (versiones futuras): metadatos online, MusicBrainz, edición de etiquetas,
+Fuera de alcance (versiones futuras): metadatos online, MusicBrainz,
 ecualizador, ReplayGain, widgets, animaciones, Android.
 
 ## Limitaciones conocidas
@@ -112,8 +115,9 @@ Detalle técnico en [`docs/AUDIO.md`](docs/AUDIO.md).
 - **Interfaz:** sin accesibilidad, atajos de teclado ni arrastrar y soltar; el relieve «hundido» se aproxima con degradados (Slint solo admite una sombra por elemento).
 - **Normalización:** las canciones cuyo formato no permite medir (archivo ilegible o silencio) suenan sin ajuste. Una canción se mide completa en segundo plano, así que su ganancia puede variar levemente entre la primera reproducción (45 s) y las siguientes. Al activar/desactivar el interruptor el cambio se oye con hasta ~2 s de retraso (audio ya en cola) y con una rampa suave. Con muchos miles de canciones el análisis en segundo plano tarda en completarse (usa baja prioridad).
 - **Crossfade:** necesita conocer la duración de la canción (MP3 sin cabecera Xing/LAME y algunos OGG no la informan: ahí se encadena sin mezclar). Una canción que entra no puede mezclarse durante más de la mitad de su duración. Con canciones muy cortas (< unos segundos más que el crossfade) la mezcla se acorta o no se hace. En la zona mezclada hay un limitador suave por si las dos canciones suman más de 0 dBFS.
-- **Ajustes:** los nombres editados se asocian a la ruta del archivo; si mueves o renombras el archivo se pierde ese nombre. Rutas con caracteres no UTF-8 se guardan con pérdida. No se guarda el volumen ni shuffle/repeat (sí normalización y crossfade).
-- **Varias carpetas:** las carpetas leídas permanecen en memoria hasta cerrar la app (con bibliotecas enormes el consumo crece). Shuffle/repeat actúan sobre la carpeta que suena, no sobre todas a la vez. No se vuelve a escanear una carpeta ya leída (reinicia la app para ver archivos nuevos).
+- **Edición de metadatos:** escribir en el archivo necesita permiso de escritura y que ningún otro programa lo tenga bloqueado. Con MP3/FLAC/OGG/WAV/AIFF se usan etiquetas estándar (ID3v2, Vorbis comments); las carátulas en OGG se guardan como `METADATA_BLOCK_PICTURE`. Un fallo a mitad de escritura podría dejar el archivo dañado (como con cualquier editor de etiquetas): haz copia de seguridad de lo importante en esta versión alpha. Si editas la canción que suena hay un corte breve en el audio.
+- **Ajustes:** los nombres editados solo en la app se asocian a la ruta del archivo; si mueves o renombras el archivo se pierde ese nombre. Rutas con caracteres no UTF-8 se guardan con pérdida. No se guarda el volumen ni shuffle/repeat (sí normalización y crossfade).
+- **Varias carpetas:** las carpetas leídas permanecen en memoria hasta cerrar la app (con bibliotecas enormes el consumo crece). Shuffle/repeat actúan sobre la carpeta que suena, no sobre todas a la vez. La vigilancia de carpetas es por sondeo cada 3 s (no instantánea) y solo detecta altas/bajas de archivos, no cambios de etiquetas hechos desde otro programa; en carpetas de red lentas o con cientos de miles de archivos el sondeo cuesta algo de E/S.
 - **Búsqueda:** al filtrar se reconstruye la lista y el scroll vuelve arriba. En el diálogo de edición, Esc cancela y Enter guarda (no probado con teclado real).
 - La bandeja no se ha probado en Windows (usa el logo; si no pudiera decodificarlo, un icono generado en código).
 
@@ -122,7 +126,9 @@ Detalle técnico en [`docs/AUDIO.md`](docs/AUDIO.md).
 | Pieza | Estado |
 |---|---|
 | `auralis-core` (cola, shuffle, repeat, tiempo, ajustes, búsqueda) | 34 tests pasan |
-| `catalog.rs` (nombres editados, búsqueda, nombres de pestañas) de `auralis-app` | 11 tests pasan (módulo sin Slint, probado aparte) |
+| `catalog.rs` (nombres editados, búsqueda, sincronización de lista con archivos nuevos/borrados, formulario de metadatos) de `auralis-app` | 15 tests pasan (módulo sin Slint, probado aparte) |
+| `auralis-library::watch` (detección de altas/bajas, espera a que termine una copia, carpeta no disponible ≠ vacía) | 3 tests pasan con carpetas temporales reales |
+| **`auralis-library::tags` (lofty + image) y `main.slint`** | **NO compilados ni probados**: no hay red para bajar `lofty`/`image`/Slint. Se escribieron contra la API documentada; es lo más probable que falle al primer `cargo build` (errores de compilación menores esperables). Lógica pura (año, vacíos) con tests escritos pero sin ejecutar |
 | `main.rs` | Comprobación de tipos y préstamos contra versiones **simuladas** de `slint`, `player`, `library` y `rfd` (sin errores). No es una compilación real |
 | `auralis-audio::converter` (canales, remuestreo sinc, vaciado final) | 11 tests pasan |
 | Motor de audio real (`output`, `decoder_thread`, `engine`) con dispositivo y lector **simulados** | 7 pruebas de comportamiento pasan: empalme gapless 44,1→48 kHz sin saltos ni pérdida de muestras, sin clics al pausar/mover volumen/cambiar de pista, seek, errores, pista corta. Comprobado que fallan con el comportamiento antiguo |

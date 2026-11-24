@@ -24,7 +24,7 @@ mod imp {
         quit_id: MenuId,
     }
 
-    /// Logo de Auralis (PNG de 64 px incrustado en el ejecutable). Si por algo
+    /// Logo de Acustia Player (PNG de 64 px incrustado en el ejecutable). Si por algo
     /// no se pudiera decodificar, se usa el icono generado en código.
     fn make_icon() -> Result<Icon, String> {
         const LOGO: &[u8] = include_bytes!("../assets/icon-64.png");
@@ -62,7 +62,7 @@ mod imp {
     impl Tray {
         pub fn new() -> Result<Self, String> {
             let menu = Menu::new();
-            let show = MenuItem::new("Mostrar Auralis", true, None);
+            let show = MenuItem::new("Mostrar Acustia Player", true, None);
             let play = MenuItem::new("Reproducir / Pausar", true, None);
             let quit = MenuItem::new("Salir", true, None);
             menu.append_items(&[&show, &play, &PredefinedMenuItem::separator(), &quit])
@@ -71,7 +71,7 @@ mod imp {
             let icon = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
                 .with_menu_on_left_click(false)
-                .with_tooltip("Auralis")
+                .with_tooltip("Acustia Player")
                 .with_icon(make_icon()?)
                 .build()
                 .map_err(|e| e.to_string())?;

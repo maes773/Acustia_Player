@@ -2,7 +2,7 @@ use slint_build::{CompilerConfiguration, EmbedResourcesKind};
 
 fn main() {
     // Las imágenes de la interfaz (icono de ventana) van dentro del ejecutable:
-    // así `auralis.exe` funciona al moverlo de carpeta.
+    // así `acustia-player.exe` funciona al moverlo de carpeta.
     let config = CompilerConfiguration::new().embed_resources(EmbedResourcesKind::EmbedFiles);
     slint_build::compile_with_config("ui/main.slint", config)
         .expect("error al compilar la interfaz Slint");
@@ -15,9 +15,9 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("assets/icon.ico");
-        res.set("ProductName", "Auralis");
-        res.set("FileDescription", "Auralis - reproductor de música local");
-        res.set("LegalCopyright", "Auralis");
+        res.set("ProductName", "Acustia Player");
+        res.set("FileDescription", "Acustia Player - reproductor de música local");
+        res.set("LegalCopyright", "Acustia Player");
         res.compile()
             .expect("no se pudo incrustar el icono en el ejecutable (¿falta el Windows SDK / rc.exe?)");
     }

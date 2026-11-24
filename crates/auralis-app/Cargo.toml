@@ -1,6 +1,6 @@
 [package]
-name = "auralis"
-description = "Auralis: reproductor de música local (v0.0.1 Alpha)"
+name = "acustia-player"
+description = "Acustia Player: reproductor de música local (v0.0.1 Alpha)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 build = "build.rs"
 
 [[bin]]
-name = "auralis"
+name = "acustia-player"
 path = "src/main.rs"
 
 [dependencies]

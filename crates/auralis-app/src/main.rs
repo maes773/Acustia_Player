@@ -1,4 +1,4 @@
-//! Auralis v0.0.1 Alpha — interfaz de escritorio (Slint).
+//! Acustia Player v0.0.1 Alpha — interfaz de escritorio (Slint).
 //!
 //! Esta capa solo traduce entre la interfaz y `auralis-player`; no contiene
 //! lógica de reproducción.
@@ -16,14 +16,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use auralis_core::{format_time, Query, Settings, TrackInfo};
-use auralis_library::{read_cover, scan_folder, CoverImage, ScanEvent};
+use auralis_library::{
+    parse_year, prepare_cover, read_cover, read_full_tags, read_metadata, scan_folder, scan_paths,
+    watch_folder, write_tags, CoverChange, CoverImage, ScanEvent, TagChanges, TrackMeta,
+    POLL_INTERVAL, SETTLE,
+};
 use auralis_player::{Player, Snapshot, Status};
 use slint::{ComponentHandle, Model, VecModel};
 
 mod catalog;
 mod power;
 mod tray;
-use catalog::{folder_names, Folder, LoadState};
+use catalog::{folder_names, Folder, LoadState, MetaForm};
 use tray::{Tray, TrayAction};
 
 slint::include_modules!();
@@ -42,6 +46,60 @@ struct ScanJob {
     rx: Receiver<ScanEvent>,
     cancel: Arc<AtomicBool>,
 }
+
+/// Vigilancia de una carpeta (altas y bajas de archivos).
+struct Watch {
+    id: u64,
+    rx: Receiver<Vec<PathBuf>>,
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+enum CoverChoice {
+    Keep,
+    Remove,
+    Replace(PathBuf),
+}
+
+/// Diálogo de edición de metadatos abierto.
+struct EditSession {
+    folder_id: u64,
+    path: PathBuf,
+    /// Identifica la sesión: las respuestas de hilos de una sesión anterior se descartan.
+    token: u64,
+    /// Valores que tiene el archivo (para escribir solo lo que cambió).
+    original: MetaForm,
+    loaded: bool,
+    saving: bool,
+    cover: CoverChoice,
+    /// Si se pausó la canción que suena para escribir en su archivo:
+    /// (estaba sonando, posición en ms).
+    resume: Option<(bool, u64)>,
+}
+
+/// Resultado de guardar las etiquetas en el archivo.
+struct Saved {
+    meta: TrackMeta,
+    /// Carátula a tamaño del reproductor principal.
+    big_cover: Option<CoverImage>,
+}
+
+enum TagMsg {
+    Loaded {
+        token: u64,
+        form: Option<MetaForm>,
+        cover: Option<CoverImage>,
+    },
+    Saved {
+        token: u64,
+        result: Result<Saved, String>,
+    },
+}
+
+/// Tamaño (px) de la carátula que se muestra en el editor.
+const EDIT_COVER_PX: u32 = 264;
+/// Tamaño (px) de las miniaturas de la lista (igual que en el escaneo).
+const LIST_COVER_PX: u32 = 96;
 
 struct AppState {
     player: Option<Player>,
@@ -68,13 +126,23 @@ struct AppState {
     /// Canción actual (índice en la carpeta que suena) ya reflejada en la interfaz.
     shown_current: Option<usize>,
     duration_ms: Option<u64>,
-    /// Canción que se está renombrando: (id de carpeta, índice).
-    editing: Option<(u64, usize)>,
+    /// Diálogo de edición de metadatos abierto, si lo hay.
+    edit: Option<EditSession>,
+    next_token: u64,
+    tag_tx: Sender<TagMsg>,
+    tag_rx: Receiver<TagMsg>,
+    /// Vigilantes de carpeta (uno por carpeta ya leída).
+    watchers: Vec<Watch>,
+    /// Último estado conocido del reproductor.
+    last_status: Status,
+    last_position_ms: u64,
     /// Se crea la primera vez que se minimiza a la bandeja.
     tray: Option<Tray>,
 }
 
-/// Ruta del archivo de ajustes: `%APPDATA%\Auralis\settings.txt` en Windows.
+/// Ruta del archivo de ajustes: `%APPDATA%\Acustia Player\settings.txt` en Windows.
+/// Si existe la carpeta de la versión anterior (`Auralis`) y aún no la nueva, se copian
+/// sus archivos para no perder carpetas, ajustes y mediciones.
 fn settings_path() -> Option<PathBuf> {
     let base = if cfg!(windows) {
         std::env::var_os("APPDATA").map(PathBuf::from)
@@ -86,12 +154,24 @@ fn settings_path() -> Option<PathBuf> {
             .filter(|p| p.is_absolute())
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
     };
-    base.map(|b| b.join("Auralis").join("settings.txt"))
+    let base = base?;
+    let dir = base.join("Acustia Player");
+    let old = base.join("Auralis");
+    if !dir.join("settings.txt").exists() && old.join("settings.txt").exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        for name in ["settings.txt", "loudness.txt"] {
+            let _ = std::fs::copy(old.join(name), dir.join(name));
+        }
+    }
+    Some(dir.join("settings.txt"))
 }
 
 /// Archivo con las mediciones de sonoridad, junto a los ajustes.
 fn loudness_path(settings: &Option<PathBuf>) -> Option<PathBuf> {
-    settings.as_ref().and_then(|p| p.parent()).map(|d| d.join("loudness.txt"))
+    settings
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d.join("loudness.txt"))
 }
 
 /// Guarda las mediciones de sonoridad si hay novedades (escritura atómica).
@@ -349,8 +429,16 @@ fn remove_folder(st: &mut AppState, ui: &MainWindow, idx: usize) {
         }
     });
     st.covers.retain(|(id, _), _| *id != removed.id);
-    if st.editing.map(|(id, _)| id) == Some(removed.id) {
-        st.editing = None;
+    st.watchers.retain(|w| {
+        if w.id == removed.id {
+            w.cancel.store(true, Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
+    });
+    if st.edit.as_ref().map(|e| e.folder_id) == Some(removed.id) {
+        st.edit = None;
         ui.set_editing(false);
     }
     if st.playing_folder == Some(removed.id) {
@@ -386,7 +474,7 @@ fn set_now_playing(st: &AppState, ui: &MainWindow, reset_cover: bool) {
             }
         }
         None => {
-            ui.set_current_title("Auralis".into());
+            ui.set_current_title("Acustia Player".into());
             ui.set_current_artist("Abre una carpeta con música".into());
             if reset_cover {
                 ui.set_has_cover(false);
@@ -460,6 +548,7 @@ fn handle_scan_event(
             false
         }
         ScanEvent::Done => {
+            start_watch(st, id);
             if fi == st.selected {
                 ui.set_status_message(folder_status(st).into());
             }
@@ -528,6 +617,8 @@ fn apply_snapshot(st: &mut AppState, ui: &MainWindow, s: &Snapshot) {
         }
     }
     st.duration_ms = s.duration_ms;
+    st.last_status = s.status;
+    st.last_position_ms = s.position_ms;
     ui.set_playing(s.status == Status::Playing);
     ui.set_shuffle(s.shuffle);
     ui.set_repeat_mode(s.repeat.as_index());
@@ -548,6 +639,403 @@ fn apply_snapshot(st: &mut AppState, ui: &MainWindow, s: &Snapshot) {
 
     if let Some(err) = &s.error {
         ui.set_status_message(err.clone().into());
+    }
+}
+
+/// Empieza a vigilar la carpeta `id` (si no se hacía ya y está disponible).
+fn start_watch(st: &mut AppState, id: u64) {
+    if st.watchers.iter().any(|w| w.id == id) {
+        return;
+    }
+    let Some(f) = st.folders.iter().find(|f| f.id == id) else {
+        return;
+    };
+    if f.state != LoadState::Ready {
+        return;
+    }
+    let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    watch_folder(f.path.clone(), POLL_INTERVAL, SETTLE, tx, cancel.clone());
+    st.watchers.push(Watch { id, rx, cancel });
+}
+
+/// Recoge los avisos de los vigilantes y actualiza las listas.
+fn drain_watch(st: &mut AppState, ui: &MainWindow) {
+    let mut changes: Vec<(u64, Vec<PathBuf>)> = Vec::new();
+    for w in &st.watchers {
+        let mut latest = None;
+        while let Ok(list) = w.rx.try_recv() {
+            latest = Some(list);
+        }
+        if let Some(list) = latest {
+            changes.push((w.id, list));
+        }
+    }
+    for (id, paths) in changes {
+        apply_folder_change(st, ui, id, paths);
+    }
+}
+
+/// La carpeta `id` ahora contiene exactamente `paths`: se añaden las canciones nuevas, se
+/// quitan las que ya no están y todo lo demás (etiquetas, carátulas, nombre editado) se
+/// conserva. Si esa carpeta es la que suena, la música no se interrumpe.
+fn apply_folder_change(st: &mut AppState, ui: &MainWindow, id: u64, paths: Vec<PathBuf>) {
+    let Some(fi) = find_folder(st, id) else {
+        return;
+    };
+    if st.folders[fi].state != LoadState::Ready {
+        return;
+    }
+    // Una lectura de etiquetas anterior de esta carpeta usaría índices que ya no valen.
+    st.jobs.retain(|j| {
+        if j.id == id {
+            j.cancel.store(true, Ordering::Relaxed);
+            false
+        } else {
+            true
+        }
+    });
+    let plan = st.folders[fi].sync_files(paths, &st.settings);
+
+    // Las miniaturas se guardan por índice: se pasan a los índices nuevos.
+    let old_keys: Vec<(u64, usize)> = st
+        .covers
+        .keys()
+        .filter(|(f, _)| *f == id)
+        .copied()
+        .collect();
+    let taken: Vec<(usize, slint::Image)> = old_keys
+        .into_iter()
+        .filter_map(|k| st.covers.remove(&k).map(|img| (k.1, img)))
+        .collect();
+    for (old, img) in taken {
+        if let Some(Some(new)) = plan.old_to_new.get(old) {
+            st.covers.insert((id, *new), img);
+        }
+    }
+
+    // Etiquetas de todo lo que aún no se había leído (las canciones nuevas y las que
+    // estaban pendientes cuando se canceló la lectura anterior).
+    let pending: Vec<(usize, PathBuf)> = st.folders[fi]
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !e.meta_read)
+        .map(|(i, e)| (i, e.info.path.clone()))
+        .collect();
+    if !pending.is_empty() {
+        let (tx, rx) = mpsc::channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        scan_paths(pending, tx, cancel.clone());
+        st.jobs.push(ScanJob { id, rx, cancel });
+    }
+
+    if st.playing_folder == Some(id) {
+        let infos: Vec<TrackInfo> = st.folders[fi]
+            .entries
+            .iter()
+            .map(|e| e.info.clone())
+            .collect();
+        let current = st.player.as_mut().and_then(|p| p.sync_tracks(infos));
+        let changed = current != st.shown_current;
+        st.shown_current = current;
+        if changed {
+            set_now_playing(st, ui, true);
+        }
+    }
+    if let Some(e) = &st.edit {
+        if e.folder_id == id && !st.folders[fi].entries.iter().any(|x| x.info.path == e.path) {
+            st.edit = None;
+            ui.set_editing(false); // el archivo que se editaba ya no existe
+        }
+    }
+    adopt_if_idle(st);
+    refresh_folders(st, ui);
+    if fi == st.selected {
+        refresh_list(st, ui);
+        let n = st.folders[fi].entries.len();
+        let added = plan.added.len();
+        let removed = plan.old_to_new.iter().filter(|n| n.is_none()).count();
+        let mut msg = format!("{n} canciones");
+        if added > 0 {
+            msg += &format!(" · {added} nueva(s)");
+        }
+        if removed > 0 {
+            msg += &format!(" · {removed} eliminada(s)");
+        }
+        ui.set_status_message(msg.into());
+    }
+}
+
+/// Abre el editor de metadatos para la canción `index` de la carpeta vista.
+fn begin_edit(st: &mut AppState, ui: &MainWindow, index: usize) {
+    let Some(f) = st.folders.get(st.selected) else {
+        return;
+    };
+    let Some(e) = f.entries.get(index) else {
+        return;
+    };
+    let token = st.next_token;
+    st.next_token += 1;
+    let path = e.info.path.clone();
+    let shown = MetaForm {
+        title: e.display_title().to_string(),
+        artist: e.info.artist.clone().unwrap_or_default(),
+        ..MetaForm::default()
+    };
+    st.edit = Some(EditSession {
+        folder_id: f.id,
+        path: path.clone(),
+        token,
+        original: shown.clone(),
+        loaded: false,
+        saving: false,
+        cover: CoverChoice::Keep,
+        resume: None,
+    });
+    ui.set_edit_file(e.info.file_name().into());
+    ui.set_edit_title(shown.title.into());
+    ui.set_edit_artist(shown.artist.into());
+    ui.set_edit_album("".into());
+    ui.set_edit_genre("".into());
+    ui.set_edit_year("".into());
+    ui.set_edit_cover(slint::Image::default());
+    ui.set_edit_has_cover(false);
+    ui.set_edit_error("".into());
+    ui.set_edit_busy(true); // hasta leer los campos completos del archivo
+    ui.set_editing(true);
+
+    // Leer los campos completos y la carátula no debe bloquear la interfaz.
+    let tx = st.tag_tx.clone();
+    std::thread::spawn(move || {
+        let form = read_full_tags(&path).ok().map(|t| MetaForm {
+            title: t.title,
+            artist: t.artist,
+            album: t.album,
+            genre: t.genre,
+            year: t.year,
+        });
+        let cover = read_cover(&path, EDIT_COVER_PX);
+        let _ = tx.send(TagMsg::Loaded { token, form, cover });
+    });
+}
+
+fn current_form(ui: &MainWindow) -> MetaForm {
+    MetaForm {
+        title: ui.get_edit_title().to_string(),
+        artist: ui.get_edit_artist().to_string(),
+        album: ui.get_edit_album().to_string(),
+        genre: ui.get_edit_genre().to_string(),
+        year: ui.get_edit_year().to_string(),
+    }
+}
+
+/// Guarda el editor: escribe en el archivo, en un hilo, solo lo que cambió.
+fn save_edit(st: &mut AppState, ui: &MainWindow) {
+    let form = current_form(ui);
+    let Some(sess) = st.edit.as_ref() else { return };
+    if sess.saving || !sess.loaded {
+        return;
+    }
+    if let Err(msg) = parse_year(&form.year) {
+        ui.set_edit_error(msg.into());
+        return;
+    }
+    let fc = form.changes_from(&sess.original);
+    if fc.is_empty() && matches!(sess.cover, CoverChoice::Keep) {
+        st.edit = None; // nada que guardar
+        ui.set_editing(false);
+        return;
+    }
+    let (token, path, cover_choice) = (sess.token, sess.path.clone(), sess.cover.clone());
+
+    // La canción que está sonando tiene el archivo abierto: se pausa mientras se escribe
+    // y después se recarga en su posición (el lector había guardado desplazamientos viejos).
+    let is_playing_track = st.playing_folder == Some(sess.folder_id)
+        && st
+            .shown_current
+            .and_then(|i| st.player.as_ref().and_then(|p| p.track(i)))
+            .is_some_and(|t| t.path == path);
+    let mut resume = None;
+    if is_playing_track {
+        let was_playing = st.last_status == Status::Playing;
+        resume = Some((was_playing, st.last_position_ms));
+        if was_playing {
+            if let Some(p) = st.player.as_mut() {
+                p.toggle_play_pause();
+            }
+        }
+    }
+    if let Some(s) = st.edit.as_mut() {
+        s.saving = true;
+        s.resume = resume;
+    }
+    ui.set_edit_busy(true);
+    ui.set_edit_error("".into());
+
+    let tx = st.tag_tx.clone();
+    std::thread::spawn(move || {
+        let result = (|| {
+            let cover = match cover_choice {
+                CoverChoice::Keep => CoverChange::Keep,
+                CoverChoice::Remove => CoverChange::Remove,
+                CoverChoice::Replace(img) => CoverChange::Replace(prepare_cover(&img)?),
+            };
+            let changes = TagChanges {
+                title: fc.title,
+                artist: fc.artist,
+                album: fc.album,
+                genre: fc.genre,
+                year: fc.year,
+                cover,
+            };
+            write_tags(&path, &changes)?;
+            // Se vuelve a leer el archivo: lo que se muestra es lo que quedó escrito.
+            Ok(Saved {
+                meta: read_metadata(&path, LIST_COVER_PX),
+                big_cover: read_cover(&path, MAIN_COVER_PX),
+            })
+        })();
+        let _ = tx.send(TagMsg::Saved { token, result });
+    });
+}
+
+/// Devuelve el reproductor a como estaba antes de escribir en el archivo que sonaba.
+fn resume_after_write(st: &mut AppState, resume: Option<(bool, u64)>) {
+    let Some((was_playing, position)) = resume else {
+        return;
+    };
+    if let Some(p) = st.player.as_mut() {
+        p.seek_ms(position); // reabre el archivo (ya modificado) en esa posición
+        if was_playing {
+            p.toggle_play_pause();
+        }
+    }
+}
+
+fn refresh_row(st: &mut AppState, ui: &MainWindow, fi: usize, index: usize) {
+    if fi != st.selected {
+        return;
+    }
+    if st.query.is_empty() {
+        if let Ok(pos) = st.visible.binary_search(&index) {
+            let id = st.folders[fi].id;
+            let current = st.playing_folder == Some(id) && st.shown_current == Some(index);
+            let row = make_row(&st.folders[fi], &st.covers, index, current);
+            st.model.set_row_data(pos, row);
+        }
+    } else {
+        refresh_list(st, ui);
+        ui.set_status_message(folder_status(st).into());
+    }
+}
+
+/// Respuestas de los hilos del editor.
+fn drain_tags(st: &mut AppState, ui: &MainWindow) {
+    while let Ok(msg) = st.tag_rx.try_recv() {
+        match msg {
+            TagMsg::Loaded { token, form, cover } => {
+                let Some(sess) = st.edit.as_mut().filter(|s| s.token == token) else {
+                    continue;
+                };
+                sess.loaded = true;
+                if let Some(f) = form {
+                    // Si el archivo no trae título, se deja el que se mostraba.
+                    let title = if f.title.trim().is_empty() {
+                        sess.original.title.clone()
+                    } else {
+                        f.title.clone()
+                    };
+                    let form = MetaForm { title, ..f };
+                    ui.set_edit_title(form.title.clone().into());
+                    ui.set_edit_artist(form.artist.clone().into());
+                    ui.set_edit_album(form.album.clone().into());
+                    ui.set_edit_genre(form.genre.clone().into());
+                    ui.set_edit_year(form.year.clone().into());
+                    sess.original = form;
+                } else {
+                    ui.set_edit_error(
+                        "No se pudieron leer todas las etiquetas del archivo; solo se muestran el título y el artista."
+                            .into(),
+                    );
+                }
+                if let Some(c) = cover {
+                    ui.set_edit_cover(to_image(&c));
+                    ui.set_edit_has_cover(true);
+                }
+                ui.set_edit_busy(false);
+            }
+            TagMsg::Saved { token, result } => {
+                let Some(sess) = st.edit.as_mut().filter(|s| s.token == token) else {
+                    continue;
+                };
+                sess.saving = false;
+                let (folder_id, path, resume) =
+                    (sess.folder_id, sess.path.clone(), sess.resume.take());
+                resume_after_write(st, resume);
+                match result {
+                    Err(msg) => {
+                        ui.set_edit_busy(false);
+                        ui.set_edit_error(
+                            format!("No se pudo escribir en el archivo: {msg}").into(),
+                        );
+                    }
+                    Ok(saved) => {
+                        st.edit = None;
+                        ui.set_editing(false);
+                        let Some(fi) = find_folder(st, folder_id) else {
+                            continue;
+                        };
+                        let Some(index) = st.folders[fi]
+                            .entries
+                            .iter()
+                            .position(|e| e.info.path == path)
+                        else {
+                            continue;
+                        };
+                        st.folders[fi].entries[index]
+                            .reset_tags(saved.meta.title, saved.meta.artist);
+                        if saved.meta.duration_ms.is_some() {
+                            st.folders[fi].entries[index].info.duration_ms = saved.meta.duration_ms;
+                        }
+                        // El nombre editado solo en la app ya no hace falta.
+                        if st.settings.set_title(&path, None).is_some()
+                            || st.settings.title_for(&path).is_some()
+                        {
+                            save_settings(st, ui);
+                        }
+                        match &saved.meta.cover {
+                            Some(c) => {
+                                st.covers.insert((folder_id, index), to_image(c));
+                            }
+                            None => {
+                                st.covers.remove(&(folder_id, index));
+                            }
+                        }
+                        if st.playing_folder == Some(folder_id) {
+                            if let Some(p) = st.player.as_mut() {
+                                let e = &st.folders[fi].entries[index];
+                                p.update_track(
+                                    index,
+                                    Some(e.info.title.clone()),
+                                    e.info.artist.clone(),
+                                    e.info.duration_ms,
+                                );
+                            }
+                            if st.shown_current == Some(index) {
+                                set_now_playing(st, ui, true);
+                                if let Some(c) = &saved.big_cover {
+                                    ui.set_current_cover(to_image(c));
+                                    ui.set_has_cover(true);
+                                }
+                            }
+                        }
+                        refresh_row(st, ui, fi, index);
+                        ui.set_status_message("Metadatos guardados en el archivo".into());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -602,6 +1090,7 @@ fn main() -> Result<(), slint::PlatformError> {
         .collect();
 
     let (cover_tx, cover_rx) = mpsc::channel();
+    let (tag_tx, tag_rx) = mpsc::channel();
     let state = Rc::new(RefCell::new(AppState {
         player,
         selected: settings.selected,
@@ -620,7 +1109,13 @@ fn main() -> Result<(), slint::PlatformError> {
         cover_rx,
         shown_current: None,
         duration_ms: None,
-        editing: None,
+        edit: None,
+        next_token: 1,
+        tag_tx,
+        tag_rx,
+        watchers: Vec::new(),
+        last_status: Status::Stopped,
+        last_position_ms: 0,
         tray: None,
     }));
     {
@@ -730,7 +1225,8 @@ fn main() -> Result<(), slint::PlatformError> {
         move |secs| {
             let Some(ui) = weak.upgrade() else { return };
             let mut st = state.borrow_mut();
-            st.settings.crossfade_secs = secs.clamp(0, auralis_core::MAX_CROSSFADE_SECS as i32) as u32;
+            st.settings.crossfade_secs =
+                secs.clamp(0, auralis_core::MAX_CROSSFADE_SECS as i32) as u32;
             let applied = st.settings.crossfade_secs;
             if let Some(p) = st.player.as_mut() {
                 p.set_crossfade_secs(applied);
@@ -743,61 +1239,101 @@ fn main() -> Result<(), slint::PlatformError> {
         let weak = ui.as_weak();
         move |i| {
             let Some(ui) = weak.upgrade() else { return };
-            let mut st = state.borrow_mut();
-            let i = i.max(0) as usize;
-            let Some(f) = st.folders.get(st.selected) else {
-                return;
-            };
-            let Some(e) = f.entries.get(i) else { return };
-            ui.set_edit_text(e.display_title().into());
-            ui.set_edit_original(e.original_title().into());
-            ui.set_edit_has_custom(e.has_custom_title());
-            let id = f.id;
-            st.editing = Some((id, i));
-            ui.set_editing(true);
+            begin_edit(&mut state.borrow_mut(), &ui, i.max(0) as usize);
         }
     });
-    // `Some(text)` guarda el nombre; `None` restaura el original (un texto vacío también).
-    let apply_rename = {
+    ui.on_edit_cancel({
         let state = state.clone();
-        let weak = ui.as_weak();
-        move |text: Option<String>| {
-            let Some(ui) = weak.upgrade() else { return };
+        move || {
             let mut st = state.borrow_mut();
-            let Some((id, i)) = st.editing.take() else {
-                return;
-            };
-            let Some(fi) = find_folder(&st, id) else {
-                return;
-            };
-            let Some(path) = st.folders[fi].entries.get(i).map(|e| e.info.path.clone()) else {
-                return;
-            };
-            let effective = st.settings.set_title(&path, text.as_deref());
-            st.folders[fi].entries[i].set_custom_title(effective);
-            if fi == st.selected {
-                if st.query.is_empty() {
-                    if let Ok(pos) = st.visible.binary_search(&i) {
-                        let current = st.playing_folder == Some(id) && st.shown_current == Some(i);
-                        let row = make_row(&st.folders[fi], &st.covers, i, current);
-                        st.model.set_row_data(pos, row);
-                    }
-                } else {
-                    refresh_list(&mut st, &ui);
-                    ui.set_status_message(folder_status(&st).into());
+            // Si se estaba escribiendo, la sesión se descarta pero el reproductor se restaura
+            // cuando termine el hilo (el resultado se ignora por no coincidir el token).
+            if let Some(sess) = st.edit.take() {
+                if sess.saving {
+                    resume_after_write(&mut st, sess.resume);
                 }
             }
-            if st.playing_folder == Some(id) && st.shown_current == Some(i) {
+        }
+    });
+    ui.on_edit_pick_cover({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            // El diálogo se abre sin tener `state` prestado.
+            let Some(path) = rfd::FileDialog::new()
+                .set_title("Elige la imagen de la carátula")
+                .add_filter("Imágenes", &["jpg", "jpeg", "png"])
+                .pick_file()
+            else {
+                return;
+            };
+            let Some(ui) = weak.upgrade() else { return };
+            match slint::Image::load_from_path(&path) {
+                Ok(img) => {
+                    if let Some(s) = state.borrow_mut().edit.as_mut() {
+                        s.cover = CoverChoice::Replace(path);
+                        ui.set_edit_cover(img);
+                        ui.set_edit_has_cover(true);
+                        ui.set_edit_error("".into());
+                    }
+                }
+                Err(_) => ui.set_edit_error("No se pudo abrir esa imagen (usa JPG o PNG)".into()),
+            }
+        }
+    });
+    ui.on_edit_remove_cover({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if let Some(s) = state.borrow_mut().edit.as_mut() {
+                s.cover = CoverChoice::Remove;
+                ui.set_edit_cover(slint::Image::default());
+                ui.set_edit_has_cover(false);
+            }
+        }
+    });
+    ui.on_edit_save({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                save_edit(&mut state.borrow_mut(), &ui);
+            }
+        }
+    });
+    // Alternativa cuando el archivo no se puede modificar: el título se guarda solo en la app.
+    ui.on_edit_save_local({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            let title = ui.get_edit_title().to_string();
+            let Some(sess) = st.edit.take() else { return };
+            ui.set_editing(false);
+            let Some(fi) = find_folder(&st, sess.folder_id) else {
+                return;
+            };
+            let Some(index) = st.folders[fi]
+                .entries
+                .iter()
+                .position(|e| e.info.path == sess.path)
+            else {
+                return;
+            };
+            let effective = st.settings.set_title(&sess.path, Some(&title));
+            st.folders[fi].entries[index].set_custom_title(effective);
+            if st.playing_folder == Some(sess.folder_id) && st.shown_current == Some(index) {
                 set_now_playing(&st, &ui, false);
             }
+            refresh_row(&mut st, &ui, fi, index);
             save_settings(&st, &ui);
+            ui.set_status_message(
+                "Nombre guardado solo en la app (el archivo no se modificó)".into(),
+            );
         }
-    };
-    ui.on_rename_confirmed({
-        let apply = apply_rename.clone();
-        move |text| apply(Some(text.to_string()))
     });
-    ui.on_rename_reset(move || apply_rename(None));
 
     ui.on_play_index({
         let state = state.clone();
@@ -910,6 +1446,8 @@ fn main() -> Result<(), slint::PlatformError> {
             }
 
             drain_scan(&mut st, &ui);
+            drain_watch(&mut st, &ui);
+            drain_tags(&mut st, &ui);
             drain_covers(&mut st, &ui);
             let snapshot = st.player.as_mut().map(|p| p.tick());
             if let Some(s) = snapshot {
