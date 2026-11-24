@@ -89,6 +89,27 @@ fn settings_path() -> Option<PathBuf> {
     base.map(|b| b.join("Auralis").join("settings.txt"))
 }
 
+/// Archivo con las mediciones de sonoridad, junto a los ajustes.
+fn loudness_path(settings: &Option<PathBuf>) -> Option<PathBuf> {
+    settings.as_ref().and_then(|p| p.parent()).map(|d| d.join("loudness.txt"))
+}
+
+/// Guarda las mediciones de sonoridad si hay novedades (escritura atómica).
+fn save_loudness(st: &AppState) {
+    let (Some(file), Some(p)) = (loudness_path(&st.settings_path), st.player.as_ref()) else {
+        return;
+    };
+    if let Some(text) = p.take_loudness_cache_if_changed() {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = file.with_extension("txt.tmp");
+        if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, &file).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+}
+
 fn save_settings(st: &AppState, ui: &MainWindow) {
     if let Some(path) = &st.settings_path {
         if let Err(e) = st.settings.save(path) {
@@ -563,6 +584,8 @@ fn main() -> Result<(), slint::PlatformError> {
         None => (Settings::default(), None),
     };
     ui.global::<Theme>().set_dark(settings.dark);
+    ui.set_normalize(settings.normalize);
+    ui.set_crossfade_secs(settings.crossfade_secs as i32);
 
     let model = Rc::new(VecModel::<TrackItem>::default());
     ui.set_tracks(model.clone().into());
@@ -602,8 +625,15 @@ fn main() -> Result<(), slint::PlatformError> {
     }));
     {
         let mut st = state.borrow_mut();
+        let loudness_file = loudness_path(&st.settings_path);
+        let (normalize, crossfade) = (st.settings.normalize, st.settings.crossfade_secs);
         if let Some(p) = st.player.as_mut() {
             p.set_volume(ui.get_volume());
+            if let Some(text) = loudness_file.and_then(|f| std::fs::read(f).ok()) {
+                p.load_loudness_cache(&String::from_utf8_lossy(&text));
+            }
+            p.set_crossfade_secs(crossfade);
+            p.set_normalize(normalize);
         }
         let idx = st.selected;
         show_folder(&mut st, &ui, idx);
@@ -679,6 +709,33 @@ fn main() -> Result<(), slint::PlatformError> {
                 st.settings.dark = dark;
                 save_settings(&st, &ui);
             }
+        }
+    });
+    ui.on_normalize_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.normalize = on;
+            if let Some(p) = st.player.as_mut() {
+                p.set_normalize(on);
+            }
+            save_settings(&st, &ui);
+        }
+    });
+    ui.on_crossfade_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |secs| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.crossfade_secs = secs.clamp(0, auralis_core::MAX_CROSSFADE_SECS as i32) as u32;
+            let applied = st.settings.crossfade_secs;
+            if let Some(p) = st.player.as_mut() {
+                p.set_crossfade_secs(applied);
+            }
+            save_settings(&st, &ui);
         }
     });
     ui.on_edit_track({
@@ -826,9 +883,15 @@ fn main() -> Result<(), slint::PlatformError> {
     timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), {
         let state = state.clone();
         let weak = ui.as_weak();
+        let mut ticks = 0u32;
         move || {
             let Some(ui) = weak.upgrade() else { return };
             let mut st = state.borrow_mut();
+            // Cada ~30 s se guardan las mediciones de sonoridad nuevas (si las hay).
+            ticks += 1;
+            if ticks % 300 == 0 {
+                save_loudness(&st);
+            }
 
             // Acciones del icono de bandeja (siguen funcionando con la ventana oculta).
             let actions = st.tray.as_ref().map(|t| t.poll()).unwrap_or_default();
@@ -863,5 +926,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // `run_event_loop_until_quit` mantiene la aplicación viva con la ventana
     // oculta (bandeja); sale con `quit_event_loop`.
     ui.show()?;
-    slint::run_event_loop_until_quit()
+    let result = slint::run_event_loop_until_quit();
+    save_loudness(&state.borrow());
+    result
 }

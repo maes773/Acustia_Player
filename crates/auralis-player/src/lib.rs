@@ -6,8 +6,10 @@
 //! [`Player::tick`], que procesa los eventos del motor y devuelve un
 //! [`Snapshot`] con todo lo que hay que mostrar.
 
-use auralis_audio::{AudioError, Engine, Event, TrackRequest};
-use auralis_core::{Queue, RepeatMode, TrackInfo};
+use std::sync::Arc;
+
+use auralis_audio::{AudioError, Engine, Event, LoudnessStore, TrackRequest};
+use auralis_core::{Queue, RepeatMode, TrackInfo, MAX_CROSSFADE_SECS};
 
 /// Si la posición supera este umbral, «anterior» reinicia la pista actual
 /// en lugar de ir a la anterior (comportamiento habitual de los reproductores).
@@ -49,14 +51,22 @@ pub struct Player {
     error_skips: usize,
     /// Ticks desde la última comprobación del dispositivo de salida.
     device_ticks: u32,
+    /// Normalizar el volumen de cada pista (nivel objetivo común).
+    normalize: bool,
+    /// Duración del crossfade en ms (0 = desactivado).
+    crossfade_ms: u32,
+    /// Mediciones de sonoridad; sobreviven al cambio de dispositivo de salida.
+    loudness: Arc<LoudnessStore>,
 }
 
 /// Cada cuántos `tick()` (≈100 ms) se comprueba si cambió el dispositivo de salida.
 const DEVICE_CHECK_TICKS: u32 = 10;
 
+
 impl Player {
     pub fn new() -> Result<Self, AudioError> {
-        let engine = Engine::new()?;
+        let loudness = LoudnessStore::new();
+        let engine = Engine::with_loudness(loudness.clone())?;
         let player = Self {
             engine,
             tracks: Vec::new(),
@@ -69,9 +79,58 @@ impl Player {
             last_error: None,
             error_skips: 0,
             device_ticks: 0,
+            normalize: false,
+            crossfade_ms: 0,
+            loudness,
         };
         player.engine.set_volume(player.volume);
         Ok(player)
+    }
+
+    // ---- Normalización y crossfade ----------------------------------------
+
+    /// Activa o desactiva la normalización de volumen entre canciones. La barra de
+    /// volumen sigue siendo el control maestro: la normalización solo iguala el nivel
+    /// de partida de cada pista.
+    pub fn set_normalize(&mut self, on: bool) {
+        self.normalize = on;
+        self.engine.set_normalize(on);
+        if on {
+            self.analyze_loudness_in_background();
+        }
+    }
+
+    pub fn normalize(&self) -> bool {
+        self.normalize
+    }
+
+    /// Duración del crossfade entre canciones, en segundos (0 = desactivado).
+    /// Solo afecta a los cambios automáticos de pista, no a siguiente/anterior.
+    pub fn set_crossfade_secs(&mut self, secs: u32) {
+        self.crossfade_ms = secs.min(MAX_CROSSFADE_SECS) * 1000;
+        self.engine.set_crossfade_ms(self.crossfade_ms);
+    }
+
+    pub fn crossfade_secs(&self) -> u32 {
+        self.crossfade_ms / 1000
+    }
+
+    /// Carga mediciones de sonoridad guardadas en una sesión anterior.
+    pub fn load_loudness_cache(&self, text: &str) {
+        self.loudness.load_text(text);
+    }
+
+    /// Mediciones para guardar en disco, solo si hay novedades desde la última vez.
+    pub fn take_loudness_cache_if_changed(&self) -> Option<String> {
+        self.loudness.take_dirty().then(|| self.loudness.to_text())
+    }
+
+    /// Pide medir en segundo plano (baja prioridad) la lista actual.
+    fn analyze_loudness_in_background(&self) {
+        if self.normalize && !self.tracks.is_empty() {
+            self.loudness
+                .analyze_in_background(self.tracks.iter().map(|t| t.path.clone()).collect());
+        }
     }
 
     // ---- Lista de pistas -------------------------------------------------
@@ -88,6 +147,7 @@ impl Player {
         self.pending_start = None;
         self.last_error = None;
         self.error_skips = 0;
+        self.analyze_loudness_in_background();
     }
 
     pub fn track(&self, index: usize) -> Option<&TrackInfo> {
@@ -280,9 +340,13 @@ impl Player {
         }
         // Si no se puede abrir (p. ej. no queda ningún dispositivo), se conserva el
         // motor actual y se reintenta en la siguiente comprobación.
-        let Ok(new_engine) = Engine::new() else { return };
+        let Ok(new_engine) = Engine::with_loudness(self.loudness.clone()) else {
+            return;
+        };
         let position = self.position_ms();
         new_engine.set_volume(self.volume);
+        new_engine.set_normalize(self.normalize);
+        new_engine.set_crossfade_ms(self.crossfade_ms);
         let name = new_engine.device_name().to_string();
         // El motor anterior se destruye aquí (su hilo y su stream se cierran).
         self.engine = new_engine;

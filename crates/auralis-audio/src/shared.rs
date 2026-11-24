@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::loudness::LoudnessStore;
 
 /// Pista que el motor debe reproducir. `id` es opaco para el motor
 /// (el controlador usa el índice en la lista de pistas).
@@ -68,10 +70,18 @@ pub(crate) struct Shared {
     /// El stream de CPAL informó de un error (p. ej. se desconectaron los auriculares):
     /// el motor debe volver a abrirse sobre el dispositivo predeterminado.
     pub stream_lost: AtomicBool,
+
+    // --- Ajustes de reproducción que lee el hilo decodificador ---
+    /// Duración del crossfade en ms (0 = desactivado: gapless).
+    pub crossfade_ms: AtomicU32,
+    /// Normalizar la sonoridad de cada pista.
+    pub normalize: AtomicBool,
+    /// Mediciones de sonoridad (compartidas entre motores al cambiar de dispositivo).
+    pub loudness: Arc<LoudnessStore>,
 }
 
 impl Shared {
-    pub fn new() -> Self {
+    pub fn new(loudness: Arc<LoudnessStore>) -> Self {
         Self {
             playing: AtomicBool::new(false),
             gain_bits: AtomicU32::new(1.0f32.to_bits()),
@@ -88,6 +98,9 @@ impl Shared {
             ring_fill: AtomicU64::new(0),
             stream_error: Mutex::new(None),
             stream_lost: AtomicBool::new(false),
+            crossfade_ms: AtomicU32::new(0),
+            normalize: AtomicBool::new(false),
+            loudness,
         }
     }
 }

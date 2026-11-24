@@ -18,6 +18,7 @@ mod converter;
 mod decoder_thread;
 mod engine;
 mod error;
+mod loudness;
 mod output;
 mod platform;
 mod reader;
@@ -25,4 +26,5 @@ mod shared;
 
 pub use engine::{Engine, Event};
 pub use error::AudioError;
+pub use loudness::{LoudnessStore, TrackLoudness, TARGET_LUFS};
 pub use shared::TrackRequest;

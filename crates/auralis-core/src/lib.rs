@@ -12,6 +12,6 @@ mod track;
 
 pub use queue::{Queue, RepeatMode};
 pub use search::Query;
-pub use settings::{same_path, Settings};
+pub use settings::{same_path, Settings, MAX_CROSSFADE_SECS};
 pub use time::format_time;
 pub use track::TrackInfo;

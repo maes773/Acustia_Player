@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 
 pub const SETTINGS_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Máximo del crossfade configurable, en segundos (como en Spotify).
+pub const MAX_CROSSFADE_SECS: u32 = 12;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     /// Tema oscuro activado.
     pub dark: bool,
@@ -34,6 +37,23 @@ pub struct Settings {
     pub selected: usize,
     /// Ruta del archivo → nombre mostrado elegido por el usuario.
     pub titles: BTreeMap<PathBuf, String>,
+    /// Normalizar el volumen de las canciones (activado por defecto).
+    pub normalize: bool,
+    /// Duración del crossfade en segundos (0 = desactivado).
+    pub crossfade_secs: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            dark: false,
+            folders: Vec::new(),
+            selected: 0,
+            titles: BTreeMap::new(),
+            normalize: true,
+            crossfade_secs: 0,
+        }
+    }
 }
 
 /// Clave de comparación de rutas: sin separador final y, en Windows, sin
@@ -100,6 +120,14 @@ impl Settings {
             };
             match key {
                 "dark" => s.dark = value.trim() == "1",
+                "normalize" => s.normalize = value.trim() != "0",
+                "crossfade" => {
+                    s.crossfade_secs = value
+                        .trim()
+                        .parse::<u32>()
+                        .unwrap_or(0)
+                        .min(MAX_CROSSFADE_SECS)
+                }
                 "selected" => selected = value.trim().parse().unwrap_or(0),
                 "folder" => {
                     let path = PathBuf::from(unescape(value));
@@ -125,8 +153,11 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         let mut out = format!(
-            "version={SETTINGS_VERSION}\ndark={}\nselected={}\n",
-            self.dark as u8, self.selected
+            "version={SETTINGS_VERSION}\ndark={}\nselected={}\nnormalize={}\ncrossfade={}\n",
+            self.dark as u8,
+            self.selected,
+            self.normalize as u8,
+            self.crossfade_secs.min(MAX_CROSSFADE_SECS)
         );
         for f in &self.folders {
             out.push_str(&format!("folder={}\n", escape(&f.to_string_lossy())));
@@ -386,5 +417,24 @@ mod tests {
         assert!(s.dark);
         assert_eq!(s.folders.len(), 1);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn playback_options_default_roundtrip_and_clamp() {
+        // Sin las claves (archivo de una versión anterior): normalizar activado, sin crossfade.
+        let s = Settings::parse("dark=1\n");
+        assert!(s.normalize);
+        assert_eq!(s.crossfade_secs, 0);
+        // Ida y vuelta.
+        let mut s = Settings::default();
+        s.normalize = false;
+        s.crossfade_secs = 7;
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        // Valores fuera de rango o basura.
+        assert_eq!(Settings::parse("crossfade=99\n").crossfade_secs, MAX_CROSSFADE_SECS);
+        assert_eq!(Settings::parse("crossfade=abc\n").crossfade_secs, 0);
+        assert_eq!(Settings::parse("crossfade=-3\n").crossfade_secs, 0);
+        assert!(!Settings::parse("normalize=0\n").normalize);
+        assert!(Settings::parse("normalize=lo-que-sea\n").normalize);
     }
 }

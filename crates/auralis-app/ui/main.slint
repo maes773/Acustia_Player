@@ -124,6 +124,58 @@ component NeuPill inherits Rectangle {
     }
 }
 
+// Interruptor encendido/apagado.
+component NeuSwitch inherits Rectangle {
+    in property <bool> on;
+    callback toggled();
+    width: 46px;
+    height: 26px;
+
+    NeuInset {
+        radius: 13px;
+    }
+    Rectangle {
+        x: root.on ? root.width - self.width - 3px : 3px;
+        y: 3px;
+        width: 20px;
+        height: 20px;
+        border-radius: 10px;
+        background: root.on ? Theme.accent : Theme.text-dim;
+        animate x { duration: 120ms; }
+    }
+    TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+// Botón redondo pequeño con un texto (− / +).
+component MiniButton inherits Rectangle {
+    in property <string> label;
+    callback clicked();
+    width: 30px;
+    height: 30px;
+
+    NeuRaised {
+        radius: 15px;
+        depth: ta.pressed ? 1px : 3px;
+        Text {
+            text: root.label;
+            color: Theme.text;
+            font-size: 16px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    ta := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 // Deslizador (progreso y volumen). `value` va de 0 a 1.
 component NeuSlider inherits Rectangle {
     in-out property <float> value: 0;
@@ -388,6 +440,9 @@ export component MainWindow inherits Window {
     in property <string> duration-text: "0:00";
     in-out property <float> progress: 0;
     in-out property <float> volume: 0.8;
+    // Normalizar el volumen de cada canción y duración del crossfade (0 = desactivado).
+    in-out property <bool> normalize: true;
+    in-out property <int> crossfade-secs: 0;
     in property <bool> playing: false;
     in property <bool> shuffle: false;
     in property <int> repeat-mode: 0; // 0 = desactivado, 1 = toda la lista, 2 = una canción
@@ -412,6 +467,8 @@ export component MainWindow inherits Window {
     callback previous-track();
     callback seek(float);
     callback set-volume(float);
+    callback normalize-changed(bool);
+    callback crossfade-changed(int);
     callback toggle-shuffle();
     callback cycle-repeat();
 
@@ -662,6 +719,66 @@ export component MainWindow inherits Window {
                     value <=> root.volume;
                     moved(v) => {
                         root.set-volume(v);
+                    }
+                }
+            }
+
+            // Normalización de volumen y crossfade.
+            VerticalLayout {
+                spacing: 10px;
+                padding-top: 4px;
+                HorizontalLayout {
+                    spacing: 12px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Normalizar volumen";
+                        color: Theme.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    NeuSwitch {
+                        on: root.normalize;
+                        toggled => {
+                            root.normalize = !root.normalize;
+                            root.normalize-changed(root.normalize);
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Text {
+                        horizontal-stretch: 1;
+                        text: "Crossfade";
+                        color: Theme.text;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    MiniButton {
+                        label: "−";
+                        clicked => {
+                            if (root.crossfade-secs > 0) {
+                                root.crossfade-secs = root.crossfade-secs - 1;
+                                root.crossfade-changed(root.crossfade-secs);
+                            }
+                        }
+                    }
+                    Text {
+                        width: 48px;
+                        text: root.crossfade-secs == 0 ? "No" : "" + root.crossfade-secs + " s";
+                        color: root.crossfade-secs == 0 ? Theme.text-dim : Theme.accent;
+                        font-size: 13px;
+                        font-weight: 600;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                    MiniButton {
+                        label: "+";
+                        clicked => {
+                            if (root.crossfade-secs < 12) {
+                                root.crossfade-secs = root.crossfade-secs + 1;
+                                root.crossfade-changed(root.crossfade-secs);
+                            }
+                        }
                     }
                 }
             }

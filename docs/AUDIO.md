@@ -61,6 +61,8 @@ Límites de diseño conocidos:
 
 ## Volumen
 
+La ganancia de normalización (ver más abajo) se aplica **antes** que este control.
+
 El control es lineal (0–1) en la interfaz y se aplica como ganancia **cuadrática** (`v²`).
 
 ## Rampas anti-clic
@@ -117,3 +119,30 @@ callback rellena con silencio: se oye como chasquidos o cortes. Medidas (hipóte
 
 Para comprobarlo: pulsa la línea de estado (diagnóstico) y mira `underruns` antes y después de pasar un
 rato en la bandeja; si sigue subiendo, el problema es otro.
+
+## Normalización de volumen
+
+`loudness.rs`: medidor BS.1770 (filtro K de dos etapas con coeficientes calculados para cualquier frecuencia,
+bloques de 400 ms con paso de 100 ms, compuerta absoluta −70 LUFS y relativa −10 LU). Ganancia de pista =
+`−14 − LUFS`, limitada a [−24, +12] dB y a que el pico de muestra no pase de −1 dBFS.
+
+- La aplica el **hilo decodificador** sobre el audio ya convertido, antes del ring buffer, así que sigue
+  correctamente alineada con los empalmes gapless y los crossfades; el callback no cambia. Al activar o
+  desactivar se hace una rampa de un bloque (~24 ms).
+- Si la pista no está en la caché, se mide al vuelo con los primeros 45 s (≈ decenas de ms) y se guarda como
+  *parcial*; el hilo `auralis-loudness` (prioridad mínima) la sustituye por la medición completa. Solo las
+  completas se guardan en disco (`loudness.txt`, con tamaño y fecha del archivo para invalidarlas si cambia).
+- `Player::set_tracks` pide al hilo medir en segundo plano toda la lista; una petición nueva cancela la anterior.
+
+## Crossfade
+
+En el hilo decodificador. Cuando a la pista actual le quedan ≤ T ms (por su duración conocida) y hay pista
+siguiente en `next_slot`, se abre la siguiente y se mezclan las dos con potencia constante
+(`cos`/`sin` de t·π/2) en bloques de 2048 fotogramas, con limitador suave sobre 0,9. El inicio de la pista
+nueva se anota en el fotograma donde empieza la mezcla (la interfaz cambia de título entonces). Si una pista
+se queda sin audio durante la mezcla, la otra sigue con la curva intacta. `Load` (siguiente/anterior/seek)
+cancela cualquier mezcla. Con T = 0 se usa el empalme gapless de siempre.
+
+Límite: `next_slot` lo fija el controlador cuando la pista actual *suena*, ~2 s después de decodificarse
+su inicio (tamaño del ring buffer); para canciones de duración < T + ~2 s la mezcla de su final puede
+llegar tarde y reducirse o convertirse en un empalme sin mezcla.

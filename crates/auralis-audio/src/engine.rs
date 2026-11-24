@@ -5,6 +5,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::decoder_thread::{self, Cmd, Ctx};
 use crate::error::AudioError;
+use crate::loudness::LoudnessStore;
 use crate::output::{self, Output};
 use crate::shared::{BoundaryKind, Shared, TrackRequest};
 
@@ -37,7 +38,13 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Result<Self, AudioError> {
-        let shared = Arc::new(Shared::new());
+        Self::with_loudness(LoudnessStore::new())
+    }
+
+    /// Como [`new`](Self::new) pero compartiendo las mediciones de sonoridad de otro
+    /// motor (así no se pierden al reabrir la salida de audio).
+    pub fn with_loudness(loudness: Arc<LoudnessStore>) -> Result<Self, AudioError> {
+        let shared = Arc::new(Shared::new(loudness));
         let (output, prod) = output::open(shared.clone())?;
         let (tx, rx) = mpsc::channel();
         let (events_tx, events_rx) = mpsc::channel();
@@ -87,7 +94,28 @@ impl Engine {
 
     /// Último error del stream de audio (CPAL) o del hilo decodificador, si lo hubo.
     pub fn take_stream_error(&self) -> Option<String> {
-        self.shared.stream_error.lock().ok().and_then(|mut s| s.take())
+        self.shared
+            .stream_error
+            .lock()
+            .ok()
+            .and_then(|mut s| s.take())
+    }
+
+    /// Activa o desactiva la normalización de volumen. Afecta a lo que se decodifica
+    /// a partir de ahora (hasta ~2 s de audio ya en cola suenan como estaban).
+    pub fn set_normalize(&self, on: bool) {
+        self.shared.normalize.store(on, Ordering::Relaxed);
+    }
+
+    /// Duración del crossfade entre pistas, en ms (0 = desactivado). Solo se aplica en
+    /// los cambios automáticos de pista y si la duración de la pista se conoce.
+    pub fn set_crossfade_ms(&self, ms: u32) {
+        self.shared.crossfade_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Mediciones de sonoridad (para guardarlas en disco y pedir análisis).
+    pub fn loudness(&self) -> &Arc<LoudnessStore> {
+        &self.shared.loudness
     }
 
     /// Nombre del dispositivo por el que está sonando.
