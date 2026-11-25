@@ -8,6 +8,7 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 use ringbuf::traits::{Consumer, Observer, Split};
 use ringbuf::{HeapCons, HeapProd, HeapRb};
 
+use crate::eq::{Equalizer, BANDS};
 use crate::error::AudioError;
 use crate::shared::Shared;
 
@@ -25,7 +26,7 @@ const RING_SECONDS: usize = 2;
 /// Tras cargar una pista, el callback espera a tener este audio acumulado
 /// antes de empezar a sonar (evita arrancar con un bloque a medias).
 const PREROLL_MS: usize = 60;
-/// Duración de las rampas de ganancia (pausa, reanudar, volumen, cambio de pista).
+/// Rampa mínima (volumen y fundidos sin configurar): evita clics.
 const RAMP_MS: f32 = 12.0;
 
 /// Nombre del dispositivo de salida predeterminado ahora mismo (`None` si no hay ninguno).
@@ -91,15 +92,21 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let rate = config.sample_rate.0 as usize;
-    let ramp_step = 1.0 / (rate as f32 * RAMP_MS / 1000.0);
+    // Paso por fotograma de una rampa de `ms` milisegundos (de 0 a 1).
+    let step_for = move |ms: f32| 1.0 / (rate as f32 * ms.max(RAMP_MS) / 1000.0);
+    let vol_step = step_for(RAMP_MS);
     let preroll_samples = rate * channels * PREROLL_MS / 1000;
 
     let mut scratch = vec![0.0f32; 16_384];
     let mut local_ack = 0u64;
-    // Ganancia aplicada ahora mismo; se acerca a la deseada mediante rampas para
-    // que pausar, reanudar, mover el volumen o cambiar de pista no produzcan
-    // saltos bruscos de señal (suenan como clics).
-    let mut gain = 0.0f32;
+    // Dos ganancias independientes, ambas con rampas para no producir saltos (clics):
+    //  - `vol`: el volumen del usuario (rampa corta, el deslizador responde al instante);
+    //  - `fade`: el fundido de pausa / reanudación / cambio de pista, de duración
+    //    configurable (la del crossfade, con tope). Se aplica con una curva suave.
+    let mut vol = 0.0f32;
+    let mut fade = 0.0f32;
+    let mut eq = Equalizer::new(config.sample_rate.0, channels);
+    let mut eq_version = 0u32;
     let mut prerolling = true;
     let err_shared = shared.clone();
 
@@ -117,8 +124,9 @@ where
         // Petición de flush (nueva pista o seek): primero se baja la ganancia a
         // cero con una rampa y solo entonces se descarta el audio viejo.
         let req = shared.flush_req.load(Ordering::Acquire);
-        if req != local_ack && gain <= 0.0 {
+        if req != local_ack && fade <= 0.0 {
             cons.clear();
+            eq.reset();
             shared.played_frames.store(0, Ordering::Relaxed);
             local_ack = req;
             shared.flush_ack.store(req, Ordering::Release);
@@ -131,8 +139,21 @@ where
             prerolling = false;
         }
 
-        let target = if playing && !flushing { volume } else { 0.0 };
-        if prerolling || (target <= 0.0 && gain <= 0.0) {
+        // Ecualizador: se relee solo cuando la interfaz lo cambió.
+        let ver = shared.eq_version.load(Ordering::Acquire);
+        if ver != eq_version {
+            eq_version = ver;
+            let mut db = [0.0f32; BANDS];
+            for (d, a) in db.iter_mut().zip(shared.eq_gains.iter()) {
+                *d = a.load(Ordering::Relaxed) as f32 / 10.0;
+            }
+            eq.set_gains(shared.eq_enabled.load(Ordering::Relaxed), &db);
+        }
+
+        let fade_target = if playing && !flushing { 1.0f32 } else { 0.0 };
+        let in_step = step_for(shared.fade_in_ms.load(Ordering::Relaxed) as f32);
+        let out_step = step_for(shared.fade_out_ms.load(Ordering::Relaxed) as f32);
+        if prerolling || (fade_target <= 0.0 && fade <= 0.0) {
             buf.fill(0.0);
         } else {
             let got = cons.pop_slice(buf);
@@ -140,11 +161,13 @@ where
                 shared.underruns.fetch_add(1, Ordering::Relaxed);
             }
             let frames = got / channels;
+            eq.process(&mut buf[..frames * channels]);
             for frame in buf[..frames * channels].chunks_exact_mut(channels) {
-                let delta = target - gain;
-                gain += delta.clamp(-ramp_step, ramp_step);
+                vol += (volume - vol).clamp(-vol_step, vol_step);
+                fade += (fade_target - fade).clamp(-out_step, in_step);
+                let g = vol * (fade * fade * (3.0 - 2.0 * fade)); // smoothstep
                 for s in frame {
-                    *s *= gain;
+                    *s *= g;
                 }
             }
             shared

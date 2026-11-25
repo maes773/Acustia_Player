@@ -17,14 +17,17 @@
 mod converter;
 mod decoder_thread;
 mod engine;
+mod eq;
 mod error;
 mod loudness;
 mod output;
 mod platform;
 mod reader;
+mod replaygain;
 mod shared;
 
 pub use engine::{Engine, Event};
 pub use error::AudioError;
+pub use replaygain::{ReplayGain, REPLAYGAIN_REFERENCE_LUFS};
 pub use loudness::{LoudnessStore, TrackLoudness, TARGET_LUFS};
 pub use shared::TrackRequest;

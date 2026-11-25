@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use crate::loudness::LoudnessStore;
@@ -76,8 +76,23 @@ pub(crate) struct Shared {
     pub crossfade_ms: AtomicU32,
     /// Normalizar la sonoridad de cada pista.
     pub normalize: AtomicBool,
+    /// Con la normalización activa, usar la ganancia ReplayGain de álbum en vez de la de pista.
+    pub rg_album: AtomicBool,
     /// Mediciones de sonoridad (compartidas entre motores al cambiar de dispositivo).
     pub loudness: Arc<LoudnessStore>,
+
+    // --- Ecualizador (lo aplica el callback, así responde al instante) ---
+    pub eq_enabled: AtomicBool,
+    /// Ganancia de cada banda en décimas de dB.
+    pub eq_gains: [AtomicI32; crate::eq::BANDS],
+    /// Se incrementa al cambiar el ecualizador; el callback relee los valores.
+    pub eq_version: AtomicU32,
+
+    // --- Duración de los fundidos del callback (ms) ---
+    /// Bajar a silencio (pausa, cambio de pista). Con 0 se usa una rampa mínima antíclic.
+    pub fade_out_ms: AtomicU32,
+    /// Subir desde el silencio (reanudar, empezar pista).
+    pub fade_in_ms: AtomicU32,
 }
 
 impl Shared {
@@ -100,7 +115,13 @@ impl Shared {
             stream_lost: AtomicBool::new(false),
             crossfade_ms: AtomicU32::new(0),
             normalize: AtomicBool::new(false),
+            rg_album: AtomicBool::new(false),
             loudness,
+            eq_enabled: AtomicBool::new(false),
+            eq_gains: std::array::from_fn(|_| AtomicI32::new(0)),
+            eq_version: AtomicU32::new(0),
+            fade_out_ms: AtomicU32::new(0),
+            fade_in_ms: AtomicU32::new(0),
         }
     }
 }

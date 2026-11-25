@@ -20,6 +20,14 @@ pub enum Event {
     Error { id: u64, message: String },
 }
 
+/// Topes de los fundidos que hace el motor al pausar, reanudar o cambiar de pista a mano
+/// (el crossfade configurable puede llegar a 12 s, pero pausar no debe tardar tanto).
+const PAUSE_FADE_MAX_MS: u32 = 1000;
+const SKIP_FADE_OUT_MAX_MS: u32 = 1500;
+const SKIP_FADE_IN_MAX_MS: u32 = 700;
+/// Fundido breve para saltos dentro de la misma pista (mover la barra de progreso).
+const QUICK_FADE_MS: u32 = 25;
+
 struct CurrentTrack {
     start_frame: u64,
     offset_ms: u64,
@@ -70,9 +78,33 @@ impl Engine {
         })
     }
 
-    /// Carga `req` empezando en `start_ms`. Descarta lo que hubiera en cola de
-    /// audio. Si `autoplay` es `false` queda en pausa.
+    /// Carga `req` empezando en `start_ms` como un **cambio de pista**: lo que suena baja
+    /// a silencio y la pista nueva sube, con la duración del crossfade (con tope).
+    /// Si `autoplay` es `false` queda en pausa.
     pub fn load(&mut self, req: TrackRequest, start_ms: u64, autoplay: bool) {
+        let cf = self.shared.crossfade_ms.load(Ordering::Relaxed);
+        self.shared
+            .fade_out_ms
+            .store(cf.min(SKIP_FADE_OUT_MAX_MS), Ordering::Relaxed);
+        self.shared
+            .fade_in_ms
+            .store(cf.min(SKIP_FADE_IN_MAX_MS), Ordering::Relaxed);
+        self.load_inner(req, start_ms, autoplay);
+    }
+
+    /// Como [`load`](Self::load) pero para saltar dentro de la misma pista (seek,
+    /// recargas internas): fundido mínimo, para que la barra de progreso responda ya.
+    pub fn load_quick(&mut self, req: TrackRequest, start_ms: u64, autoplay: bool) {
+        self.shared
+            .fade_out_ms
+            .store(QUICK_FADE_MS, Ordering::Relaxed);
+        self.shared
+            .fade_in_ms
+            .store(QUICK_FADE_MS, Ordering::Relaxed);
+        self.load_inner(req, start_ms, autoplay);
+    }
+
+    fn load_inner(&mut self, req: TrackRequest, start_ms: u64, autoplay: bool) {
         let epoch = self.shared.epoch.fetch_add(1, Ordering::AcqRel) + 1;
         self.current = None;
         self.shared.playing.store(autoplay, Ordering::Relaxed);
@@ -105,6 +137,22 @@ impl Engine {
     /// a partir de ahora (hasta ~2 s de audio ya en cola suenan como estaban).
     pub fn set_normalize(&self, on: bool) {
         self.shared.normalize.store(on, Ordering::Relaxed);
+    }
+
+    /// Con la normalización activa: usar la ganancia ReplayGain de álbum (si el archivo la
+    /// trae) en vez de la de pista. Sin etiquetas se usa siempre la sonoridad medida.
+    pub fn set_replaygain_album(&self, on: bool) {
+        self.shared.rg_album.store(on, Ordering::Relaxed);
+    }
+
+    /// Ecualizador de 10 bandas. `gains_tenths` en décimas de dB (±120). Se aplica en el
+    /// callback, así que se oye al instante y con una transición suave.
+    pub fn set_eq(&self, enabled: bool, gains_tenths: &[i16; crate::eq::BANDS]) {
+        for (slot, g) in self.shared.eq_gains.iter().zip(gains_tenths) {
+            slot.store((*g).clamp(-120, 120) as i32, Ordering::Relaxed);
+        }
+        self.shared.eq_enabled.store(enabled, Ordering::Relaxed);
+        self.shared.eq_version.fetch_add(1, Ordering::Release);
     }
 
     /// Duración del crossfade entre pistas, en ms (0 = desactivado). Solo se aplica en
@@ -165,11 +213,25 @@ impl Engine {
         }
     }
 
+    fn set_pause_fade(&self) {
+        let ms = self
+            .shared
+            .crossfade_ms
+            .load(Ordering::Relaxed)
+            .min(PAUSE_FADE_MAX_MS);
+        self.shared.fade_out_ms.store(ms, Ordering::Relaxed);
+        self.shared.fade_in_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// Reanuda con un fundido de entrada (la duración del crossfade, hasta 1 s).
     pub fn play(&self) {
+        self.set_pause_fade();
         self.shared.playing.store(true, Ordering::Relaxed);
     }
 
+    /// Pausa con un fundido de salida: el audio ya en cola sigue sonando mientras baja.
     pub fn pause(&self) {
+        self.set_pause_fade();
         self.shared.playing.store(false, Ordering::Relaxed);
     }
 

@@ -156,3 +156,43 @@ llegar tarde y reducirse o convertirse en un empalme sin mezcla.
 - Cuando la vigilancia detecta archivos nuevos/borrados, `Player::sync_tracks` sustituye la lista conservando
   la canción actual (se busca por ruta); si el archivo que suena desaparece, la reproducción se detiene.
 - El disco giratorio es solo UI (un `Timer` de Slint que actualiza el ángulo mientras suena); no toca el motor.
+
+## Ecualizador
+
+`eq.rs`: 10 filtros peaking biquad (Audio EQ Cookbook, Q = 1,414 ≈ una octava) en forma directa II transpuesta,
+f64 internamente. Corre en el **callback** de audio, después de sacar las muestras del ring buffer y antes de las
+ganancias de volumen y fundido: así los deslizadores responden al instante en vez de esperar ~2 s de audio ya
+decodificado. El callback solo lee atómicos (`eq_enabled`, `eq_gains` en décimas de dB, `eq_version`); al cambiar la
+versión recalcula los coeficientes (unas pocas funciones trigonométricas, sin reservar memoria) y los **interpola**
+durante 512 fotogramas para evitar crujidos. Preamp automático = −(máximo de la respuesta combinada en una rejilla
+logarítmica de 96 puntos), porque las bandas contiguas se suman y pueden superar la mayor ganancia individual;
+después, un limitador suave (rodilla en 0,9) acota los picos que los desfases de los filtros puedan producir. Con todo
+a 0 dB el proceso se omite por completo. Los presets están en `auralis-core::eq` (datos puros, reutilizables en Android).
+
+## ReplayGain
+
+`reader.rs` recoge, al abrir el archivo, las etiquetas `REPLAYGAIN_{TRACK,ALBUM}_{GAIN,PEAK}` (por nombre de
+etiqueta, sin distinguir mayúsculas; admite el prefijo `TXXX:` de ID3v2) de los metadatos previos al contenedor y de los
+del contenedor. `replaygain.rs` convierte la ganancia: `dB_etiqueta + (−14 − (−18))` y la limita para que
+`pico × ganancia ≤ −1 dBFS` y a [−30, +15] dB. El hilo decodificador (`apply_gain`) usa esa ganancia si existe (en modo
+álbum prefiere la de álbum y recurre a la de pista); si no hay etiqueta aplicable, usa la sonoridad medida de siempre,
+y solo entonces se mide (con etiqueta no se gasta CPU). La ganancia en caché de cada pista recuerda con qué modo
+(álbum/pista) se calculó, así que cambiar el interruptor surte efecto en la siguiente pista.
+
+## Fundidos del callback (pausa, reanudar, cambio de pista)
+
+El callback aplica dos ganancias independientes: `vol` (el volumen del usuario, rampa fija de 12 ms) y `fade`
+(0..1, curva *smoothstep*) cuya duración sube/baja se lee de `fade_in_ms`/`fade_out_ms`. El motor las fija según la
+operación a partir del crossfade configurable: `pause()`/`play()` → min(crossfade, 1000 ms); `load()` (cambio de
+pista) → salida min(crossfade, 1500 ms), entrada min(crossfade, 700 ms); `load_quick()` (seek, recargas internas)
+→ 25 ms. El flush del ring buffer ya esperaba a que el callback llegase a silencio; ahora el decodificador espera
+`fade_out_ms + 300 ms` (si no, lo que escribiera después se borraría junto al audio viejo). Durante el fundido de
+pausa el callback sigue consumiendo audio, así que al reanudar la posición es coherente. Con el crossfade en 0 las
+duraciones valen la rampa mínima de 12 ms (comportamiento anterior).
+
+## Favoritos e historial
+
+Datos puros en `auralis-core`: `Settings::favorites` (conjunto de rutas, línea `fav=` en `settings.txt`) y `History`
+(`history.txt`, una línea por canción: hora, ruta, título y artista tal como se veían, hasta 300). El historial no
+duplica la misma canción consecutiva (recargas al editar o al cambiar de dispositivo), solo refresca su título.
+

@@ -8,11 +8,12 @@ use symphonia::core::codecs::{Decoder, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::{FormatOptions, FormatReader, SeekMode, SeekTo};
 use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
+use symphonia::core::meta::{MetadataOptions, MetadataRevision};
 use symphonia::core::probe::Hint;
 use symphonia::core::units::Time;
 
 use crate::error::AudioError;
+use crate::replaygain::ReplayGain;
 
 pub struct TrackReader {
     format: Box<dyn FormatReader>,
@@ -20,6 +21,16 @@ pub struct TrackReader {
     track_id: u32,
     sample_buf: Option<SampleBuffer<f32>>,
     pub duration_ms: Option<u64>,
+    /// Etiquetas ReplayGain del archivo (vacías si no tiene).
+    pub replaygain: ReplayGain,
+}
+
+/// Toma las etiquetas ReplayGain de una revisión de metadatos. Se busca por el nombre de
+/// la etiqueta (Vorbis comments y TXXX de ID3v2 usan `REPLAYGAIN_*`).
+fn collect_replaygain(rev: &MetadataRevision, rg: &mut ReplayGain) {
+    for tag in rev.tags() {
+        rg.set_from_tag(&tag.key, &tag.value.to_string());
+    }
 }
 
 impl TrackReader {
@@ -39,12 +50,22 @@ impl TrackReader {
             enable_gapless: true,
             ..Default::default()
         };
-        let probed = symphonia::default::get_probe().format(
+        let mut probed = symphonia::default::get_probe().format(
             &hint,
             mss,
             &fmt_opts,
             &MetadataOptions::default(),
         )?;
+        // ReplayGain: metadatos previos al contenedor (ID3v2) y del propio contenedor.
+        let mut replaygain = ReplayGain::default();
+        if let Some(m) = probed.metadata.get() {
+            if let Some(rev) = m.current() {
+                collect_replaygain(rev, &mut replaygain);
+            }
+        }
+        if let Some(rev) = probed.format.metadata().current() {
+            collect_replaygain(rev, &mut replaygain);
+        }
         let mut format = probed.format;
 
         let track = format
@@ -81,6 +102,7 @@ impl TrackReader {
             track_id,
             sample_buf: None,
             duration_ms,
+            replaygain,
         })
     }
 

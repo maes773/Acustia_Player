@@ -13,8 +13,8 @@ use thread_priority::{set_current_thread_priority, ThreadPriority};
 
 use crate::converter::Converter;
 use crate::engine::Event;
-use crate::loudness::TARGET_LUFS;
 use crate::reader::TrackReader;
+use crate::replaygain::norm_gain;
 use crate::shared::{Boundary, BoundaryKind, Shared, TrackRequest};
 
 pub enum Cmd {
@@ -38,8 +38,9 @@ struct Active {
     /// El archivo se leyó entero y la cola del conversor ya está en `pending`:
     /// en cuanto se vacíe se encadena la pista siguiente.
     eof: bool,
-    /// Ganancia de normalización de la pista (se mide la primera vez que hace falta).
-    norm_gain: Option<f32>,
+    /// Ganancia de normalización de la pista y el modo (álbum o pista) con que se calculó:
+    /// ReplayGain si el archivo lo trae; si no, la sonoridad medida la primera vez que hace falta.
+    norm_gain: Option<(bool, f32)>,
     /// Ganancia aplicada al último fotograma: el cambio hasta la ganancia deseada
     /// (p. ej. al activar o desactivar la normalización) se hace con una rampa.
     cur_gain: Option<f32>,
@@ -132,13 +133,18 @@ fn apply_gain(ctx: &Ctx, a: &mut Active, buf: &mut [f32]) {
         return;
     }
     let target = if ctx.shared.normalize.load(Ordering::Relaxed) {
-        let path = &a.req.path;
-        *a.norm_gain.get_or_insert_with(|| {
-            ctx.shared
-                .loudness
-                .loudness_now(path)
-                .map_or(1.0, |l| l.gain_for(TARGET_LUFS))
-        })
+        let album = ctx.shared.rg_album.load(Ordering::Relaxed);
+        match a.norm_gain {
+            Some((mode, g)) if mode == album => g,
+            _ => {
+                let path = &a.req.path;
+                let (g, _) = norm_gain(&a.reader.replaygain, album, || {
+                    ctx.shared.loudness.loudness_now(path)
+                });
+                a.norm_gain = Some((album, g));
+                g
+            }
+        }
     } else {
         1.0
     };
@@ -330,7 +336,11 @@ impl State {
     fn flush(&mut self) {
         let shared = &self.ctx.shared;
         let req = shared.flush_req.fetch_add(1, Ordering::AcqRel) + 1;
-        let deadline = Instant::now() + Duration::from_millis(300);
+        // El callback baja primero a silencio con un fundido (hasta `fade_out_ms`) y solo
+        // entonces vacía el buffer: hay que esperar ese tiempo, o lo que se escribiera
+        // después del flush se borraría junto con el audio viejo.
+        let fade = shared.fade_out_ms.load(Ordering::Relaxed) as u64;
+        let deadline = Instant::now() + Duration::from_millis(300 + fade);
         while shared.flush_ack.load(Ordering::Acquire) != req && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(1));
         }

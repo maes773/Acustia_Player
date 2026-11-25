@@ -17,10 +17,12 @@
 //! Los nombres editados se guardan **aparte del archivo de audio**: nunca se
 //! modifica el archivo ni sus etiquetas.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::eq::{clamp_tenths, identify_preset, preset_gains, EqGains, EQ_BANDS};
 
 pub const SETTINGS_VERSION: u32 = 1;
 
@@ -41,6 +43,15 @@ pub struct Settings {
     pub normalize: bool,
     /// Duración del crossfade en segundos (0 = desactivado).
     pub crossfade_secs: u32,
+    /// Con la normalización activada: usar la ganancia de ÁLBUM de ReplayGain (conserva la
+    /// dinámica entre las canciones de un disco) en vez de la de pista.
+    pub replaygain_album: bool,
+    /// Ecualizador activado.
+    pub eq_enabled: bool,
+    /// Ganancias de las 10 bandas, en décimas de dB (±120).
+    pub eq_gains: EqGains,
+    /// Canciones favoritas (por ruta de archivo).
+    pub favorites: BTreeSet<PathBuf>,
 }
 
 impl Default for Settings {
@@ -52,6 +63,10 @@ impl Default for Settings {
             titles: BTreeMap::new(),
             normalize: true,
             crossfade_secs: 0,
+            replaygain_album: false,
+            eq_enabled: false,
+            eq_gains: [0; EQ_BANDS],
+            favorites: BTreeSet::new(),
         }
     }
 }
@@ -128,10 +143,34 @@ impl Settings {
                         .unwrap_or(0)
                         .min(MAX_CROSSFADE_SECS)
                 }
+                "replaygain_album" => s.replaygain_album = value.trim() == "1",
+                "eq" => s.eq_enabled = value.trim() == "1",
+                "eq_preset" => {
+                    // Escribe el preset por nombre de índice; las bandas se guardan aparte.
+                    if let Some(g) = value.trim().parse::<usize>().ok().and_then(preset_gains) {
+                        s.eq_gains = g;
+                    }
+                }
+                "eq_gains" => {
+                    let v: Vec<i16> = value
+                        .split(',')
+                        .map(|x| clamp_tenths(x.trim().parse::<i32>().unwrap_or(0)))
+                        .collect();
+                    if v.len() == EQ_BANDS {
+                        s.eq_gains.copy_from_slice(&v);
+                    }
+                }
+                "fav" => {
+                    let path = PathBuf::from(unescape(value));
+                    if !path.as_os_str().is_empty() {
+                        s.favorites.insert(path);
+                    }
+                }
                 "selected" => selected = value.trim().parse().unwrap_or(0),
                 "folder" => {
                     let path = PathBuf::from(unescape(value));
-                    if !path.as_os_str().is_empty() && !s.folders.iter().any(|f| same_path(f, &path))
+                    if !path.as_os_str().is_empty()
+                        && !s.folders.iter().any(|f| same_path(f, &path))
                     {
                         s.folders.push(path);
                     }
@@ -147,7 +186,11 @@ impl Settings {
                 _ => {}
             }
         }
-        s.selected = if selected < s.folders.len() { selected } else { 0 };
+        s.selected = if selected < s.folders.len() {
+            selected
+        } else {
+            0
+        };
         s
     }
 
@@ -159,6 +202,19 @@ impl Settings {
             self.normalize as u8,
             self.crossfade_secs.min(MAX_CROSSFADE_SECS)
         );
+        out.push_str(&format!(
+            "replaygain_album={}\neq={}\neq_gains={}\n",
+            self.replaygain_album as u8,
+            self.eq_enabled as u8,
+            self.eq_gains
+                .iter()
+                .map(|g| g.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        ));
+        for f in &self.favorites {
+            out.push_str(&format!("fav={}\n", escape(&f.to_string_lossy())));
+        }
         for f in &self.folders {
             out.push_str(&format!("folder={}\n", escape(&f.to_string_lossy())));
         }
@@ -231,6 +287,29 @@ impl Settings {
         }
     }
 
+    // ---- Favoritos ---------------------------------------------------------
+
+    pub fn is_favorite(&self, file: &Path) -> bool {
+        self.favorites.contains(file)
+    }
+
+    /// Alterna el favorito de `file`; devuelve el estado nuevo.
+    pub fn toggle_favorite(&mut self, file: &Path) -> bool {
+        if self.favorites.remove(file) {
+            false
+        } else {
+            self.favorites.insert(file.to_path_buf());
+            true
+        }
+    }
+
+    // ---- Ecualizador -------------------------------------------------------
+
+    /// Índice del preset que coincide con las bandas actuales, o `EQ_CUSTOM`.
+    pub fn eq_preset(&self) -> u8 {
+        identify_preset(&self.eq_gains)
+    }
+
     // ---- Nombres editados --------------------------------------------------
 
     pub fn title_for(&self, file: &Path) -> Option<&str> {
@@ -273,7 +352,10 @@ mod tests {
         s.add_folder(PathBuf::from("/home/yo/Música/rock & roll"));
         s.selected = 1;
         s.set_title(Path::new(r"C:\Users\yo\Música\01.mp3"), Some("Mi canción"));
-        s.set_title(Path::new("/home/yo/a.flac"), Some("Con\ttab, \\barra y\nsalto ñ 日本語"));
+        s.set_title(
+            Path::new("/home/yo/a.flac"),
+            Some("Con\ttab, \\barra y\nsalto ñ 日本語"),
+        );
         s
     }
 
@@ -286,7 +368,9 @@ mod tests {
     #[test]
     fn defaults_for_empty_or_garbage_input() {
         assert_eq!(Settings::parse(""), Settings::default());
-        let g = Settings::parse("esto no es un ajuste\n=\nfolder\n\u{0}\u{1}\ndark=quizá\nselected=abc\n");
+        let g = Settings::parse(
+            "esto no es un ajuste\n=\nfolder\n\u{0}\u{1}\ndark=quizá\nselected=abc\n",
+        );
         assert_eq!(g, Settings::default());
     }
 
@@ -299,8 +383,14 @@ mod tests {
 
     #[test]
     fn selected_is_clamped_to_a_valid_folder() {
-        assert_eq!(Settings::parse("selected=5\nfolder=/a\nfolder=/b\n").selected, 0);
-        assert_eq!(Settings::parse("selected=1\nfolder=/a\nfolder=/b\n").selected, 1);
+        assert_eq!(
+            Settings::parse("selected=5\nfolder=/a\nfolder=/b\n").selected,
+            0
+        );
+        assert_eq!(
+            Settings::parse("selected=1\nfolder=/a\nfolder=/b\n").selected,
+            1
+        );
         assert_eq!(Settings::parse("selected=3\n").selected, 0);
     }
 
@@ -335,7 +425,10 @@ mod tests {
         let mut s = mk();
         s.selected = 2;
         s.remove_folder(0); // quitar una anterior: la seleccionada sigue siendo /c
-        assert_eq!((s.selected, &s.folders[s.selected]), (1, &PathBuf::from("/c")));
+        assert_eq!(
+            (s.selected, &s.folders[s.selected]),
+            (1, &PathBuf::from("/c"))
+        );
 
         let mut s = mk();
         s.selected = 2;
@@ -392,7 +485,10 @@ mod tests {
         let s = sample();
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file).unwrap(), s);
-        assert!(!dir.join("sub").join("settings.txt.tmp").exists(), "no debe quedar el temporal");
+        assert!(
+            !dir.join("sub").join("settings.txt.tmp").exists(),
+            "no debe quedar el temporal"
+        );
         // Sobrescribir uno existente.
         let mut s2 = s.clone();
         s2.dark = false;
@@ -404,7 +500,10 @@ mod tests {
     #[test]
     fn missing_file_means_defaults() {
         let dir = temp_dir("missing");
-        assert_eq!(Settings::load(&dir.join("no-existe.txt")).unwrap(), Settings::default());
+        assert_eq!(
+            Settings::load(&dir.join("no-existe.txt")).unwrap(),
+            Settings::default()
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -431,10 +530,44 @@ mod tests {
         s.crossfade_secs = 7;
         assert_eq!(Settings::parse(&s.to_text()), s);
         // Valores fuera de rango o basura.
-        assert_eq!(Settings::parse("crossfade=99\n").crossfade_secs, MAX_CROSSFADE_SECS);
+        assert_eq!(
+            Settings::parse("crossfade=99\n").crossfade_secs,
+            MAX_CROSSFADE_SECS
+        );
         assert_eq!(Settings::parse("crossfade=abc\n").crossfade_secs, 0);
         assert_eq!(Settings::parse("crossfade=-3\n").crossfade_secs, 0);
         assert!(!Settings::parse("normalize=0\n").normalize);
         assert!(Settings::parse("normalize=lo-que-sea\n").normalize);
+    }
+
+    #[test]
+    fn eq_replaygain_and_favorites_roundtrip() {
+        let mut s = Settings::default();
+        s.eq_enabled = true;
+        s.replaygain_album = true;
+        s.eq_gains = [60, 50, -40, 0, 0, 0, 0, 10, 0, -120];
+        assert!(s.toggle_favorite(Path::new("/m/a.mp3")));
+        assert!(s.toggle_favorite(Path::new("C:\\x\ty.flac")));
+        assert!(!s.toggle_favorite(Path::new("/m/a.mp3")));
+        assert!(!s.is_favorite(Path::new("/m/a.mp3")));
+        assert!(s.is_favorite(Path::new("C:\\x\ty.flac")));
+        assert_eq!(Settings::parse(&s.to_text()), s);
+    }
+
+    #[test]
+    fn eq_values_are_validated() {
+        // Versión anterior: sin ecualizador.
+        let s = Settings::parse("dark=1\n");
+        assert!(!s.eq_enabled && !s.replaygain_album && s.favorites.is_empty());
+        assert_eq!(s.eq_gains, [0; EQ_BANDS]);
+        // Fuera de rango → se limita; número de bandas incorrecto → se ignora.
+        let s = Settings::parse("eq_gains=999,-999,0,0,0,0,0,0,0,x\n");
+        assert_eq!(s.eq_gains, [120, -120, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(Settings::parse("eq_gains=1,2,3\n").eq_gains, [0; EQ_BANDS]);
+        assert_eq!(
+            Settings::parse("eq_preset=3\n").eq_gains,
+            preset_gains(3).unwrap()
+        );
+        assert_eq!(Settings::parse("eq_preset=99\n").eq_gains, [0; EQ_BANDS]);
     }
 }

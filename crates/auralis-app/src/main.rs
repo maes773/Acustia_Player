@@ -7,15 +7,17 @@
 #![cfg_attr(all(not(debug_assertions), windows), windows_subsystem = "windows")]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use auralis_core::{format_time, Query, Settings, TrackInfo};
+use auralis_core::eq as coreeq;
+use auralis_core::history::ago_text;
+use auralis_core::{format_time, History, Query, Settings, TrackInfo, EQ_CUSTOM};
 use auralis_library::{
     parse_year, prepare_cover, read_cover, read_full_tags, read_metadata, scan_folder, scan_paths,
     watch_folder, write_tags, CoverChange, CoverImage, ScanEvent, TagChanges, TrackMeta,
@@ -138,6 +140,15 @@ struct AppState {
     last_position_ms: u64,
     /// Se crea la primera vez que se minimiza a la bandeja.
     tray: Option<Tray>,
+    /// Mostrar solo las canciones favoritas de la carpeta vista.
+    favorites_only: bool,
+    history: History,
+    history_path: Option<PathBuf>,
+    history_model: Rc<VecModel<HistoryItem>>,
+    /// Ganancias del ecualizador (dB) y sus textos: se actualizan fila a fila para no
+    /// reconstruir los deslizadores mientras se arrastra uno.
+    eq_model: Rc<VecModel<f32>>,
+    eq_text_model: Rc<VecModel<slint::SharedString>>,
 }
 
 /// Ruta del archivo de ajustes: `%APPDATA%\Acustia Player\settings.txt` en Windows.
@@ -232,8 +243,153 @@ fn find_folder(st: &AppState, id: u64) -> Option<usize> {
     st.folders.iter().position(|f| f.id == id)
 }
 
+fn history_path(settings: &Option<PathBuf>) -> Option<PathBuf> {
+    settings
+        .as_deref()
+        .and_then(Path::parent)
+        .map(|d| d.join("history.txt"))
+}
+
+fn save_history(st: &AppState) {
+    if let Some(p) = &st.history_path {
+        let _ = st.history.save(p); // el historial es secundario: un fallo no molesta
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Reconstruye la lista del historial (las 100 más recientes).
+fn refresh_history(st: &AppState) {
+    let now = now_secs();
+    let known: HashSet<&Path> = st
+        .folders
+        .iter()
+        .flat_map(|f| f.entries.iter().map(|e| e.info.path.as_path()))
+        .collect();
+    let items: Vec<HistoryItem> = st
+        .history
+        .entries()
+        .iter()
+        .take(100)
+        .map(|e| {
+            let ago = ago_text(now, e.played_at);
+            HistoryItem {
+                title: e.title.clone().into(),
+                subtitle: if e.artist.is_empty() {
+                    ago
+                } else {
+                    format!("{} · {}", e.artist, ago)
+                }
+                .into(),
+                available: known.contains(e.path.as_path()),
+            }
+        })
+        .collect();
+    st.history_model.set_vec(items);
+}
+
+/// Anota en el historial la canción `index` de la carpeta que suena.
+fn record_history(st: &mut AppState, ui: &MainWindow, index: usize) {
+    let Some(f) = st
+        .playing_folder
+        .and_then(|id| st.folders.iter().find(|f| f.id == id))
+    else {
+        return;
+    };
+    let Some(e) = f.entries.get(index) else {
+        return;
+    };
+    let (path, title, artist) = (
+        e.info.path.clone(),
+        e.display_title().to_string(),
+        e.info.artist.clone().unwrap_or_default(),
+    );
+    if st.history.record(now_secs(), path, title, artist) {
+        save_history(st);
+        if ui.get_history_open() {
+            refresh_history(st);
+        }
+    }
+}
+
+/// Reproduce la canción `path` buscándola en las carpetas añadidas: cambia a su pestaña
+/// y la pone en cola. `false` si ya no está en ninguna.
+fn play_path(st: &mut AppState, ui: &MainWindow, path: &Path) -> bool {
+    let found = st.folders.iter().enumerate().find_map(|(fi, f)| {
+        f.entries
+            .iter()
+            .position(|e| e.info.path == path)
+            .map(|ti| (fi, ti))
+    });
+    let Some((fi, ti)) = found else { return false };
+    show_folder(st, ui, fi);
+    if !make_playing(st, fi) {
+        return false;
+    }
+    refresh_folders(st, ui);
+    if let Some(p) = st.player.as_mut() {
+        p.play_index(ti);
+    }
+    true
+}
+
+/// «+3.5», «-2.0», «0».
+fn fmt_db(tenths: i16) -> String {
+    if tenths == 0 {
+        "0".to_string()
+    } else {
+        format!("{:+.1}", tenths as f32 / 10.0)
+    }
+}
+
+/// Refleja los ajustes del ecualizador en la interfaz (fila a fila si ya había datos).
+fn sync_eq_ui(st: &AppState, ui: &MainWindow) {
+    let gains = st.settings.eq_gains;
+    let db: Vec<f32> = gains.iter().map(|&t| coreeq::tenths_to_db(t)).collect();
+    let texts: Vec<slint::SharedString> = gains.iter().map(|&t| fmt_db(t).into()).collect();
+    if st.eq_model.row_count() == db.len() {
+        for (i, (v, t)) in db.iter().zip(texts).enumerate() {
+            if st.eq_model.row_data(i) != Some(*v) {
+                st.eq_model.set_row_data(i, *v);
+            }
+            st.eq_text_model.set_row_data(i, t);
+        }
+    } else {
+        st.eq_model.set_vec(db);
+        st.eq_text_model.set_vec(texts);
+    }
+    let preset = st.settings.eq_preset();
+    ui.set_eq_preset(if preset == EQ_CUSTOM {
+        -1
+    } else {
+        preset as i32
+    });
+    ui.set_eq_preset_label(
+        coreeq::preset_name(preset as usize)
+            .unwrap_or("Personalizado")
+            .into(),
+    );
+    ui.set_eq_enabled(st.settings.eq_enabled);
+}
+
+/// Aplica el ecualizador al motor, actualiza la interfaz y guarda.
+fn apply_eq(st: &mut AppState, ui: &MainWindow) {
+    let (enabled, gains) = (st.settings.eq_enabled, st.settings.eq_gains);
+    if let Some(p) = st.player.as_mut() {
+        p.set_eq(enabled, gains);
+    }
+    sync_eq_ui(st, ui);
+    save_settings(st, ui);
+}
+
 fn make_row(
     f: &Folder,
+    settings: &Settings,
     covers: &HashMap<(u64, usize), slint::Image>,
     i: usize,
     current: bool,
@@ -254,6 +410,7 @@ fn make_row(
         has_cover: cover.is_some(),
         current,
         edited: e.has_custom_title(),
+        favorite: settings.is_favorite(&e.info.path),
     }
 }
 
@@ -283,11 +440,24 @@ fn refresh_list(st: &mut AppState, ui: &MainWindow) {
         return;
     };
     st.visible = f.visible(&st.query);
+    if st.favorites_only {
+        let settings = &st.settings;
+        st.visible
+            .retain(|&i| settings.is_favorite(&f.entries[i].info.path));
+    }
     let playing = st.playing_folder == Some(f.id);
     let rows: Vec<TrackItem> = st
         .visible
         .iter()
-        .map(|&i| make_row(f, &st.covers, i, playing && st.shown_current == Some(i)))
+        .map(|&i| {
+            make_row(
+                f,
+                &st.settings,
+                &st.covers,
+                i,
+                playing && st.shown_current == Some(i),
+            )
+        })
         .collect();
     st.model.set_vec(rows);
     ui.set_folder_name(f.path.to_string_lossy().into_owned().into());
@@ -298,6 +468,10 @@ fn refresh_list(st: &mut AppState, ui: &MainWindow) {
             LoadState::Ready if f.entries.is_empty() => {
                 "No hay archivos compatibles (MP3, FLAC, WAV, OGG, AIFF)"
             }
+            LoadState::Ready if st.favorites_only && st.query.is_empty() => {
+                "Aún no hay favoritas en esta carpeta: pulsa la estrella de una canción"
+            }
+            LoadState::Ready if st.favorites_only => "Ninguna favorita coincide con la búsqueda",
             LoadState::Ready => "Ninguna canción coincide con la búsqueda",
         }
         .into(),
@@ -312,6 +486,9 @@ fn folder_status(st: &AppState) -> String {
     match f.state {
         LoadState::Missing => "La carpeta no está disponible (¿disco desconectado?)".to_string(),
         LoadState::NotLoaded | LoadState::Loading => "Buscando música…".to_string(),
+        LoadState::Ready if st.favorites_only => {
+            format!("★ {} de {} canciones", st.visible.len(), f.entries.len())
+        }
         LoadState::Ready if !st.query.is_empty() => {
             format!("{} de {} canciones", st.visible.len(), f.entries.len())
         }
@@ -537,7 +714,8 @@ fn handle_scan_event(
                     if let Ok(pos) = st.visible.binary_search(&index) {
                         let current =
                             st.playing_folder == Some(id) && st.shown_current == Some(index);
-                        let row = make_row(&st.folders[fi], &st.covers, index, current);
+                        let row =
+                            make_row(&st.folders[fi], &st.settings, &st.covers, index, current);
                         st.model.set_row_data(pos, row);
                     }
                 } else {
@@ -605,6 +783,9 @@ fn apply_snapshot(st: &mut AppState, ui: &MainWindow, s: &Snapshot) {
         set_current_flag(st, s.current, true);
         st.shown_current = s.current;
         set_now_playing(st, ui, true);
+        if let Some(i) = s.current {
+            record_history(st, ui, i);
+        }
 
         if let (Some(i), Some(id), Some(p)) = (s.current, st.playing_folder, st.player.as_ref()) {
             if let Some(track) = p.track(i) {
@@ -921,7 +1102,7 @@ fn refresh_row(st: &mut AppState, ui: &MainWindow, fi: usize, index: usize) {
         if let Ok(pos) = st.visible.binary_search(&index) {
             let id = st.folders[fi].id;
             let current = st.playing_folder == Some(id) && st.shown_current == Some(index);
-            let row = make_row(&st.folders[fi], &st.covers, index, current);
+            let row = make_row(&st.folders[fi], &st.settings, &st.covers, index, current);
             st.model.set_row_data(pos, row);
         }
     } else {
@@ -1089,6 +1270,26 @@ fn main() -> Result<(), slint::PlatformError> {
         .map(|(i, (path, name))| Folder::new(i as u64 + 1, path.clone(), name))
         .collect();
 
+    let history_path = history_path(&settings_path);
+    let history = history_path
+        .as_deref()
+        .and_then(|p| History::load(p).ok())
+        .unwrap_or_default();
+    let history_model = Rc::new(VecModel::<HistoryItem>::default());
+    ui.set_history_items(history_model.clone().into());
+    let eq_model = Rc::new(VecModel::<f32>::default());
+    let eq_text_model = Rc::new(VecModel::<slint::SharedString>::default());
+    ui.set_eq_gains(eq_model.clone().into());
+    ui.set_eq_gain_texts(eq_text_model.clone().into());
+    let preset_names: Vec<slint::SharedString> =
+        coreeq::preset_names().into_iter().map(Into::into).collect();
+    ui.set_eq_preset_names(Rc::new(VecModel::from(preset_names)).into());
+    let band_names: Vec<slint::SharedString> = (0..coreeq::EQ_BANDS)
+        .map(|i| coreeq::band_label(i).into())
+        .collect();
+    ui.set_eq_band_names(Rc::new(VecModel::from(band_names)).into());
+    ui.set_replaygain_album(settings.replaygain_album);
+
     let (cover_tx, cover_rx) = mpsc::channel();
     let (tag_tx, tag_rx) = mpsc::channel();
     let state = Rc::new(RefCell::new(AppState {
@@ -1117,12 +1318,25 @@ fn main() -> Result<(), slint::PlatformError> {
         last_status: Status::Stopped,
         last_position_ms: 0,
         tray: None,
+        favorites_only: false,
+        history,
+        history_path,
+        history_model,
+        eq_model,
+        eq_text_model,
     }));
     {
         let mut st = state.borrow_mut();
         let loudness_file = loudness_path(&st.settings_path);
         let (normalize, crossfade) = (st.settings.normalize, st.settings.crossfade_secs);
+        let (rg_album, eq_on, eq_gains) = (
+            st.settings.replaygain_album,
+            st.settings.eq_enabled,
+            st.settings.eq_gains,
+        );
         if let Some(p) = st.player.as_mut() {
+            p.set_replaygain_album(rg_album);
+            p.set_eq(eq_on, eq_gains);
             p.set_volume(ui.get_volume());
             if let Some(text) = loudness_file.and_then(|f| std::fs::read(f).ok()) {
                 p.load_loudness_cache(&String::from_utf8_lossy(&text));
@@ -1130,6 +1344,7 @@ fn main() -> Result<(), slint::PlatformError> {
             p.set_crossfade_secs(crossfade);
             p.set_normalize(normalize);
         }
+        sync_eq_ui(&st, &ui);
         let idx = st.selected;
         show_folder(&mut st, &ui, idx);
         if let Some(msg) = init_error.or(load_error) {
@@ -1230,6 +1445,153 @@ fn main() -> Result<(), slint::PlatformError> {
             let applied = st.settings.crossfade_secs;
             if let Some(p) = st.player.as_mut() {
                 p.set_crossfade_secs(applied);
+            }
+            save_settings(&st, &ui);
+        }
+    });
+    ui.on_toggle_favorite({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            let (fi, index) = (st.selected, i.max(0) as usize);
+            let Some(path) = st
+                .folders
+                .get(fi)
+                .and_then(|f| f.entries.get(index))
+                .map(|e| e.info.path.clone())
+            else {
+                return;
+            };
+            let now_fav = st.settings.toggle_favorite(&path);
+            save_settings(&st, &ui);
+            if st.favorites_only {
+                // La lista cambia (una canción deja de aparecer): se reconstruye.
+                refresh_list(&mut st, &ui);
+            } else {
+                refresh_row(&mut st, &ui, fi, index);
+            }
+            ui.set_status_message(
+                if now_fav {
+                    "Añadida a favoritos".to_string()
+                } else if st.favorites_only {
+                    folder_status(&st)
+                } else {
+                    "Quitada de favoritos".to_string()
+                }
+                .into(),
+            );
+        }
+    });
+    ui.on_favorites_only_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.favorites_only = on;
+            refresh_list(&mut st, &ui);
+            ui.set_status_message(folder_status(&st).into());
+        }
+    });
+    ui.on_history_opened({
+        let state = state.clone();
+        move || refresh_history(&state.borrow())
+    });
+    ui.on_history_play({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            let Some(path) = st
+                .history
+                .entries()
+                .get(i.max(0) as usize)
+                .map(|e| e.path.clone())
+            else {
+                return;
+            };
+            if play_path(&mut st, &ui, &path) {
+                ui.set_history_open(false);
+                save_settings(&st, &ui);
+            } else {
+                ui.set_status_message("Esa canción ya no está en ninguna de tus carpetas".into());
+            }
+        }
+    });
+    ui.on_history_clear({
+        let state = state.clone();
+        move || {
+            let mut st = state.borrow_mut();
+            st.history.clear();
+            save_history(&st);
+            refresh_history(&st);
+        }
+    });
+    ui.on_eq_toggled({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.eq_enabled = on;
+            apply_eq(&mut st, &ui);
+        }
+    });
+    ui.on_eq_preset_selected({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            if let Some(g) = coreeq::preset_gains(i.max(0) as usize) {
+                st.settings.eq_gains = g;
+                st.settings.eq_enabled = true; // elegir un preset lo activa
+                apply_eq(&mut st, &ui);
+            }
+        }
+    });
+    ui.on_eq_band_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |band, db| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            let band = band.max(0) as usize;
+            if band >= coreeq::EQ_BANDS {
+                return;
+            }
+            // Pasos de 0,5 dB.
+            let tenths = coreeq::clamp_tenths(((db * 2.0).round() * 5.0) as i32);
+            if st.settings.eq_gains[band] == tenths && st.settings.eq_enabled {
+                return;
+            }
+            st.settings.eq_gains[band] = tenths;
+            st.settings.eq_enabled = true; // tocar una banda lo activa
+            apply_eq(&mut st, &ui);
+        }
+    });
+    ui.on_eq_reset({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.eq_gains = [0; coreeq::EQ_BANDS];
+            apply_eq(&mut st, &ui);
+        }
+    });
+    ui.on_replaygain_album_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.replaygain_album = on;
+            if let Some(p) = st.player.as_mut() {
+                p.set_replaygain_album(on);
             }
             save_settings(&st, &ui);
         }

@@ -4,12 +4,16 @@
 //! Este crate no depende de audio, interfaz ni de APIs de Windows (solo `std`),
 //! de modo que puede reutilizarse tal cual en Android.
 
+pub mod eq;
+pub mod history;
 mod queue;
 pub mod search;
 pub mod settings;
 mod time;
 mod track;
 
+pub use eq::{EqGains, EQ_BANDS, EQ_CUSTOM};
+pub use history::{History, HistoryEntry};
 pub use queue::{Queue, RepeatMode};
 pub use search::Query;
 pub use settings::{same_path, Settings, MAX_CROSSFADE_SECS};

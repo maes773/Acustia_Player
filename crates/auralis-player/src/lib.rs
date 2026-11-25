@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use auralis_audio::{AudioError, Engine, Event, LoudnessStore, TrackRequest};
-use auralis_core::{Queue, RepeatMode, TrackInfo, MAX_CROSSFADE_SECS};
+use auralis_core::{EqGains, Queue, RepeatMode, TrackInfo, EQ_BANDS, MAX_CROSSFADE_SECS};
 
 /// Si la posición supera este umbral, «anterior» reinicia la pista actual
 /// en lugar de ir a la anterior (comportamiento habitual de los reproductores).
@@ -55,13 +55,17 @@ pub struct Player {
     normalize: bool,
     /// Duración del crossfade en ms (0 = desactivado).
     crossfade_ms: u32,
+    /// Usar la ganancia ReplayGain de álbum en vez de la de pista.
+    replaygain_album: bool,
+    /// Ecualizador: activado y ganancias por banda (décimas de dB).
+    eq_enabled: bool,
+    eq_gains: EqGains,
     /// Mediciones de sonoridad; sobreviven al cambio de dispositivo de salida.
     loudness: Arc<LoudnessStore>,
 }
 
 /// Cada cuántos `tick()` (≈100 ms) se comprueba si cambió el dispositivo de salida.
 const DEVICE_CHECK_TICKS: u32 = 10;
-
 
 impl Player {
     pub fn new() -> Result<Self, AudioError> {
@@ -81,6 +85,9 @@ impl Player {
             device_ticks: 0,
             normalize: false,
             crossfade_ms: 0,
+            replaygain_album: false,
+            eq_enabled: false,
+            eq_gains: [0; EQ_BANDS],
             loudness,
         };
         player.engine.set_volume(player.volume);
@@ -104,8 +111,24 @@ impl Player {
         self.normalize
     }
 
+    /// ReplayGain: con la normalización activa, usar la ganancia de álbum (conserva la
+    /// dinámica relativa entre las canciones de un disco) en vez de la de pista. Las
+    /// canciones sin etiquetas ReplayGain se normalizan con la sonoridad medida.
+    pub fn set_replaygain_album(&mut self, on: bool) {
+        self.replaygain_album = on;
+        self.engine.set_replaygain_album(on);
+    }
+
+    /// Ecualizador de 10 bandas (ganancias en décimas de dB, ±120).
+    pub fn set_eq(&mut self, enabled: bool, gains: EqGains) {
+        self.eq_enabled = enabled;
+        self.eq_gains = gains;
+        self.engine.set_eq(enabled, &gains);
+    }
+
     /// Duración del crossfade entre canciones, en segundos (0 = desactivado).
-    /// Solo afecta a los cambios automáticos de pista, no a siguiente/anterior.
+    /// Mezcla las canciones que se encadenan solas; además, con el crossfade activado,
+    /// pausar, reanudar y pasar a otra canción a mano usan un fundido (hasta 1–1,5 s).
     pub fn set_crossfade_secs(&mut self, secs: u32) {
         self.crossfade_ms = secs.min(MAX_CROSSFADE_SECS) * 1000;
         self.engine.set_crossfade_ms(self.crossfade_ms);
@@ -175,7 +198,7 @@ impl Player {
             if let Some(req) = self.request(ni) {
                 let autoplay = self.status == Status::Playing;
                 self.pending_start = Some(position);
-                self.engine.load(req, position, autoplay);
+                self.engine.load_quick(req, position, autoplay);
             }
         }
         self.refresh_next();
@@ -268,7 +291,7 @@ impl Player {
         let autoplay = self.status == Status::Playing;
         if let Some(req) = self.request(index) {
             self.pending_start = Some(ms);
-            self.engine.load(req, ms, autoplay);
+            self.engine.load_quick(req, ms, autoplay);
             if self.status == Status::Stopped {
                 self.status = Status::Paused;
             }
@@ -307,13 +330,19 @@ impl Player {
 
     /// Empieza `index` (la cola ya está posicionada por el llamador).
     fn start(&mut self, index: usize, start_ms: u64, autoplay: bool) {
-        let Some(req) = self.request(index) else { return };
+        let Some(req) = self.request(index) else {
+            return;
+        };
         self.current = Some(index);
         self.duration_ms = self.tracks[index].duration_ms;
         self.pending_start = Some(start_ms);
         self.last_error = None;
         self.engine.load(req, start_ms, autoplay);
-        self.status = if autoplay { Status::Playing } else { Status::Paused };
+        self.status = if autoplay {
+            Status::Playing
+        } else {
+            Status::Paused
+        };
         self.refresh_next();
     }
 
@@ -328,7 +357,8 @@ impl Player {
     }
 
     fn position_ms(&self) -> u64 {
-        self.pending_start.unwrap_or_else(|| self.engine.position_ms())
+        self.pending_start
+            .unwrap_or_else(|| self.engine.position_ms())
     }
 
     fn display_name(&self, index: usize) -> String {
@@ -380,6 +410,8 @@ impl Player {
         new_engine.set_volume(self.volume);
         new_engine.set_normalize(self.normalize);
         new_engine.set_crossfade_ms(self.crossfade_ms);
+        new_engine.set_replaygain_album(self.replaygain_album);
+        new_engine.set_eq(self.eq_enabled, &self.eq_gains);
         let name = new_engine.device_name().to_string();
         // El motor anterior se destruye aquí (su hilo y su stream se cierran).
         self.engine = new_engine;
@@ -388,7 +420,7 @@ impl Player {
                 if let Some(req) = self.request(index) {
                     let autoplay = self.status == Status::Playing;
                     self.pending_start = Some(position);
-                    self.engine.load(req, position, autoplay);
+                    self.engine.load_quick(req, position, autoplay);
                     self.refresh_next();
                 }
             }
