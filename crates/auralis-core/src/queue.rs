@@ -34,7 +34,11 @@ struct XorShift(u64);
 
 impl XorShift {
     fn new(seed: u64) -> Self {
-        Self(if seed == 0 { 0x9E37_79B9_7F4A_7C15 } else { seed })
+        Self(if seed == 0 {
+            0x9E37_79B9_7F4A_7C15
+        } else {
+            seed
+        })
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -356,7 +360,10 @@ mod tests {
         assert_eq!(q.order(), &[0, 1, 2, 3, 4, 5]);
         assert_eq!(q.current(), Some(cur));
         // continúa en orden original desde la pista actual
-        assert_eq!(q.peek_next_auto(), if cur + 1 < 6 { Some(cur + 1) } else { None });
+        assert_eq!(
+            q.peek_next_auto(),
+            if cur + 1 < 6 { Some(cur + 1) } else { None }
+        );
     }
 
     #[test]

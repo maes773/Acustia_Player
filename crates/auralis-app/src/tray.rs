@@ -6,21 +6,76 @@
 pub enum TrayAction {
     Show,
     TogglePlay,
+    Next,
+    Previous,
+    ToggleShuffle,
+    CycleRepeat,
     Quit,
+}
+
+/// Lo que el menú de la bandeja muestra del reproductor.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrayState {
+    pub playing: bool,
+    pub shuffle: bool,
+    /// 0 = no repetir, 1 = toda la lista, 2 = una canción.
+    pub repeat: i32,
+    /// «Título — Artista» de la canción actual (vacío si no hay).
+    pub now_playing: String,
+}
+
+/// Texto del elemento «Repetir» del menú.
+pub fn repeat_label(mode: i32) -> &'static str {
+    match mode {
+        1 => "Repetir: toda la lista",
+        2 => "Repetir: una canción",
+        _ => "Repetir: no",
+    }
+}
+
+/// Texto del elemento de reproducir/pausar y de la línea de la canción actual.
+pub fn play_label(playing: bool) -> &'static str {
+    if playing {
+        "Pausar"
+    } else {
+        "Reproducir"
+    }
+}
+
+pub fn now_playing_label(text: &str) -> String {
+    if text.is_empty() {
+        "Nada en reproducción".to_string()
+    } else {
+        // Un menú con una línea enorme es ilegible: se recorta.
+        let t: String = text.chars().take(60).collect();
+        if text.chars().count() > 60 {
+            format!("♪ {t}…")
+        } else {
+            format!("♪ {t}")
+        }
+    }
 }
 
 #[cfg(windows)]
 mod imp {
-    use super::TrayAction;
-    use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+    use super::{now_playing_label, play_label, repeat_label, TrayAction, TrayState};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
     use tray_icon::{
         Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     };
 
     pub struct Tray {
         icon: TrayIcon,
+        now: MenuItem,
+        play: MenuItem,
+        shuffle: CheckMenuItem,
+        repeat: MenuItem,
         show_id: MenuId,
         play_id: MenuId,
+        next_id: MenuId,
+        prev_id: MenuId,
+        shuffle_id: MenuId,
+        repeat_id: MenuId,
         quit_id: MenuId,
     }
 
@@ -62,11 +117,28 @@ mod imp {
     impl Tray {
         pub fn new() -> Result<Self, String> {
             let menu = Menu::new();
+            let now = MenuItem::new(now_playing_label(""), false, None);
+            let play = MenuItem::new(play_label(false), true, None);
+            let prev = MenuItem::new("Anterior", true, None);
+            let next = MenuItem::new("Siguiente", true, None);
+            let shuffle = CheckMenuItem::new("Aleatorio", true, false, None);
+            let repeat = MenuItem::new(repeat_label(0), true, None);
             let show = MenuItem::new("Mostrar Acustia Player", true, None);
-            let play = MenuItem::new("Reproducir / Pausar", true, None);
             let quit = MenuItem::new("Salir", true, None);
-            menu.append_items(&[&show, &play, &PredefinedMenuItem::separator(), &quit])
-                .map_err(|e| e.to_string())?;
+            menu.append_items(&[
+                &now,
+                &PredefinedMenuItem::separator(),
+                &play,
+                &prev,
+                &next,
+                &PredefinedMenuItem::separator(),
+                &shuffle,
+                &repeat,
+                &PredefinedMenuItem::separator(),
+                &show,
+                &quit,
+            ])
+            .map_err(|e| e.to_string())?;
 
             let icon = TrayIconBuilder::new()
                 .with_menu(Box::new(menu))
@@ -80,8 +152,32 @@ mod imp {
                 icon,
                 show_id: show.id().clone(),
                 play_id: play.id().clone(),
+                next_id: next.id().clone(),
+                prev_id: prev.id().clone(),
+                shuffle_id: shuffle.id().clone(),
+                repeat_id: repeat.id().clone(),
                 quit_id: quit.id().clone(),
+                now,
+                play,
+                shuffle,
+                repeat,
             })
+        }
+
+        /// Actualiza los textos y la marca del menú (llamar solo cuando el estado cambie).
+        pub fn set_state(&self, s: &TrayState) {
+            self.now.set_text(now_playing_label(&s.now_playing));
+            self.play.set_text(play_label(s.playing));
+            self.shuffle.set_checked(s.shuffle);
+            self.repeat.set_text(repeat_label(s.repeat));
+            let tip = if s.now_playing.is_empty() {
+                "Acustia Player".to_string()
+            } else {
+                // El texto de ayuda de la bandeja de Windows admite unos 120 caracteres.
+                let t: String = s.now_playing.chars().take(100).collect();
+                format!("Acustia Player — {t}")
+            };
+            let _ = self.icon.set_tooltip(Some(tip));
         }
 
         pub fn set_visible(&self, visible: bool) {
@@ -96,6 +192,14 @@ mod imp {
                     actions.push(TrayAction::Show);
                 } else if ev.id == self.play_id {
                     actions.push(TrayAction::TogglePlay);
+                } else if ev.id == self.next_id {
+                    actions.push(TrayAction::Next);
+                } else if ev.id == self.prev_id {
+                    actions.push(TrayAction::Previous);
+                } else if ev.id == self.shuffle_id {
+                    actions.push(TrayAction::ToggleShuffle);
+                } else if ev.id == self.repeat_id {
+                    actions.push(TrayAction::CycleRepeat);
                 } else if ev.id == self.quit_id {
                     actions.push(TrayAction::Quit);
                 }
@@ -121,7 +225,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::TrayAction;
+    use super::{TrayAction, TrayState};
 
     pub struct Tray;
 
@@ -130,6 +234,7 @@ mod imp {
             Err("la bandeja del sistema solo está disponible en Windows".into())
         }
         pub fn set_visible(&self, _visible: bool) {}
+        pub fn set_state(&self, _s: &TrayState) {}
         pub fn poll(&self) -> Vec<TrayAction> {
             Vec::new()
         }

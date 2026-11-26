@@ -1,4 +1,4 @@
-# Acustia Player — v0.0.4 Alpha (antes «Auralis»)
+# Acustia Player — v0.0.6 Alpha (antes «Auralis»)
 
 Reproductor de música local para Windows, escrito en Rust con Slint (interfaz neumórfica),
 Symphonia (decodificación) y CPAL (salida de audio). Sin Electron ni Chromium.
@@ -25,12 +25,16 @@ pero la ejecución es más lenta; para escuchar música usa `--release`.
 
 ## Tema y bandeja
 
-- **Tema claro/oscuro:** botón de luna/sol en la cabecera (no se recuerda entre sesiones).
+- **Tema claro/oscuro:** botón de luna/sol en la cabecera (se recuerda entre sesiones).
+- **Apariencia (botón del círculo de color junto a la búsqueda):**
+  - **Ambient Light:** el acento, el fondo (teñido al menos un 35 %) y un resplandor tras el CD toman el color dominante de la carátula de la canción que suena, con un fundido de 0,6 s al cambiar. El color se calcula muestreando ~4000 píxeles (coste despreciable) y se ignoran grises, casi negros y píxeles transparentes; si la carátula es gris o no hay, se usa tu tema. Se puede desactivar con un interruptor.
+  - **Temas configurables:** modo base claro u oscuro, 8 presets (Índigo —el original—, Océano, Menta, Bosque, Ámbar, Atardecer, Rosa, Violeta), un deslizador de **color de acento** (matiz) y otro de **tinte del fondo** (0 = el gris-azul original; 100 = fondo del color elegido). El acento se ajusta solo para tener contraste suficiente (un amarillo sigue leyéndose sobre blanco). Con Ambient Light activo y una carátula con color, los controles manuales se atenúan porque no tienen efecto hasta que lo desactives. «Restablecer» vuelve a Índigo sin tinte.
+- **Atajos globales de teclado (Windows):** funcionan con la ventana en segundo plano o en la bandeja. Teclas multimedia (reproducir/pausar, siguiente, anterior, detener) y `Ctrl+Alt+Espacio` reproducir/pausar, `Ctrl+Alt+→/←` siguiente/anterior, `Ctrl+Alt+↑/↓` volumen ±5 %, `Ctrl+Alt+S` aleatorio, `Ctrl+Alt+R` repetir (lista → canción → no), `Ctrl+Alt+A` mostrar la ventana. Interruptor para desactivarlos en el panel de apariencia; si otra aplicación ya tiene alguno (p. ej. Spotify con las teclas multimedia), el panel lo avisa y el resto sigue funcionando.
 - **Logo:** `crates/auralis-app/assets/` (`icon.svg` es el original; `icon.ico` y los PNG se generan
   a partir de él). El `.ico` se incrusta en `acustia-player.exe` al compilar para Windows (requiere el
   Windows SDK, que incluyen las Build Tools de Visual Studio); los PNG se usan en la ventana y la bandeja.
 - **Bandeja del sistema (solo Windows):** botón ⌄ de la cabecera. Oculta la ventana y deja un
-  icono; clic izquierdo restaura, clic derecho abre el menú (Mostrar, Reproducir/Pausar, Salir).
+  icono; clic izquierdo restaura, clic derecho abre el menú: canción actual, Reproducir/Pausar, **Anterior**, **Siguiente**, **Aleatorio** (con marca), **Repetir** (no / toda la lista / una canción) , Mostrar y Salir. El menú y el texto del icono se actualizan solos con lo que suena.
   La música sigue sonando. Cerrar con la **X** sale de la aplicación.
 
 ## Si no suena nada
@@ -77,6 +81,10 @@ reutilizar `core`, `audio`, `library` y `player` con otra interfaz.
 - **Se guarda entre sesiones:** carpetas, carpeta seleccionada, modo oscuro y nombres editados, en `%APPDATA%\Acustia Player\settings.txt` (texto plano, escritura atómica). Si una carpeta ya no existe (disco desconectado) sigue en la lista marcada con ⚠ y se reintenta al seleccionarla.
 - **Editar metadatos** con el lápiz de cada fila: título, artista, álbum, género, año y **carátula** (elegir JPG/PNG o quitarla). Se **incrustan en el archivo** (ID3 en MP3/AIFF/WAV, Vorbis en FLAC/OGG) con `lofty`, en un hilo aparte, y solo se escribe lo que cambió. La carátula se guarda tal cual si es JPEG/PNG de ≤900 KB; si no, se reduce a ≤1000 px JPEG q85. Si se edita la canción que suena, se pausa un instante mientras se escribe y se reanuda en la misma posición. Si el archivo no se puede modificar (solo lectura, formato sin soporte de etiquetas), el botón «Solo en la app» guarda el nombre sin tocar el archivo.
 - **Detección automática de cambios en carpetas:** cada carpeta leída se vigila (sondeo cada 3 s, sin dependencias nativas). Las canciones nuevas aparecen solas y las borradas desaparecen; no se interrumpe la música ni se pierden nombres/carátulas. Se espera a que un archivo deje de crecer (1,5 s) antes de añadirlo, para no leer copias a medias. Una carpeta no disponible (disco desconectado) no se interpreta como vacía.
+- **Modo widget:** botón de la ventana pequeña (junto a la luna/sol) o «Pasar a modo widget ahora» en Ajustes. La ventana pasa a un panel compacto de 380×150 sin marco (CD o cassette, título, artista, barra de progreso, anterior/play/siguiente, volver a la ventana completa y ocultar a la bandeja). Se **arrastra desde cualquier parte libre** y **se queda donde la sueltes**: la posición se guarda en los ajustes y se restaura al volver a abrirlo. Opcionalmente «Widget siempre encima de otras ventanas».
+- **Ajustes** (engranaje junto a la búsqueda): «Abrir siempre en modo widget» y «Iniciar Acustia al arrancar el equipo» (entrada `HKCU\...\Run` creada con `reg.exe`, sin permisos de administrador; se renueva la ruta en cada arranque por si mueves el programa).
+- **Modo podcast por carpeta:** casilla «Modo podcast (esta carpeta)» sobre la búsqueda. Es independiente en cada carpeta (una puede ser música y otra podcast; las pestañas de podcast llevan la marca POD). Lo que suena desde una carpeta de podcast muestra un **cassette** en vez del CD: las dos bobinas giran mientras suena y la cinta pasa de la bobina izquierda a la derecha según el progreso del episodio.
+- **Estadísticas de escucha** (botón de barras junto a la búsqueda): tiempo escuchado hoy / últimos 7 días / este mes / este año, total de música y de **horas de podcast**, promedio por día, días con escucha y racha, número de canciones locales y episodios, reproducciones contadas, **artista**, **canción** y podcast más escuchados, top 8 de canciones y de artistas y un gráfico de los últimos 14 días. Se guardan en `%APPDATA%\Acustia Player\stats.txt`. «Reiniciar» las borra.
 - **Disco neumórfico giratorio** en el reproductor, con la carátula como etiqueta del CD; gira mientras suena y se detiene al pausar (disco plateado liso si no hay carátula).
 - **Renombrado a Acustia Player:** los ajustes de la versión anterior (`%APPDATA%\Auralis`) se copian automáticamente a `%APPDATA%\Acustia Player`.
 - **Ecualizador de 10 bandas** (botón con los tres deslizadores, junto a la búsqueda): 31 Hz a 16 kHz, ±12 dB en pasos de 0,5 dB, con 12 presets (Plano, Bajos potenciados, Agudos potenciados, Rock, Pop, Jazz, Clásica, Electrónica, Hip-Hop, Voz, Acústico, Noche). Mover una banda o elegir un preset lo activa; si las bandas no coinciden con ningún preset aparece «Personalizado». Funciona en el callback de audio, así que se oye al instante y los cambios se interpolan (sin crujidos). Un *preamp* automático compensa el máximo de la respuesta combinada para que subir bandas no sature, y un limitador suave protege los picos. Se guarda en los ajustes.
@@ -101,7 +109,7 @@ reutilizar `core`, `audio`, `library` y `player` con otra interfaz.
 - Formatos: MP3, FLAC, WAV, OGG Vorbis, AIFF.
 
 Fuera de alcance (versiones futuras): metadatos online, MusicBrainz,
-widgets, Android, vistas por artista/álbum/género.
+Android, vistas por artista/álbum/género.
 
 ## Limitaciones conocidas
 
@@ -130,17 +138,25 @@ Detalle técnico en [`docs/AUDIO.md`](docs/AUDIO.md).
 - **Búsqueda:** al filtrar se reconstruye la lista y el scroll vuelve arriba. En el diálogo de edición, Esc cancela y Enter guarda (no probado con teclado real).
 - La bandeja no se ha probado en Windows (usa el logo; si no pudiera decodificarlo, un icono generado en código).
 
+- **Apariencia y atajos:** las combinaciones de teclas son fijas (no hay editor de atajos propios) y solo Windows. Los fundidos de color dependen de la animación de Slint; en equipos muy lentos el resplandor (desenfoque de 90 px, con la capa en caché) es lo más costoso de dibujar: se puede desactivar con Ambient Light. El color dominante es una heurística (carátulas con muchos colores pueden dar un tono «medio» poco representativo).
+- **Modo widget:** no se puede «clavar» debajo de las demás ventanas como un gadget del escritorio (Slint no lo permite); el widget es una ventana normal, y «siempre encima» es la alternativa. El cambio de ventana con marco a sin marco en caliente, la restauración de la posición y el arrastre dependen del backend de Slint/Windows y **no se han probado**; si el arrastre va a saltos o el widget aparece fuera de pantalla tras quitar un monitor, avísame. La posición se guarda en píxeles físicos y no se comprueba contra los monitores conectados.
+- **Estadísticas:** empiezan a contar desde esta versión (no hay datos anteriores). Cuenta el tiempo realmente sonando (la pausa no suma); una canción cuenta como «reproducción» tras 30 s escuchados y se vuelve a contar al repetirla desde el principio. Se agrupan por día **local** (la zona horaria se pide a Windows). «Canciones locales» y «Episodios» cuentan solo las carpetas que ya se han leído en esta sesión. El «artista/podcast» sale de la etiqueta de artista de cada archivo (en podcasts, normalmente el nombre del programa); sin etiqueta no entra en esos rankings. Se recuerdan como máximo 5000 canciones distintas (se descartan las menos escuchadas).
+- **Modo podcast:** solo cambia la animación (cassette) y de qué lado cuentan las estadísticas; no recuerda la posición por episodio ni cambia la velocidad de reproducción.
+- **Inicio con el equipo:** usa `reg.exe` (solo Windows). Si mueves el `.exe`, se actualiza la ruta la siguiente vez que lo abras. Si tu antivirus bloquea escribir en `Run`, el ajuste mostrará el error.
+
 ## Estado de verificación
 
 | Pieza | Estado |
 |---|---|
 | `catalog.rs` (nombres editados, búsqueda, sincronización de lista con archivos nuevos/borrados, formulario de metadatos) de `auralis-app` | 15 tests pasan (módulo sin Slint, probado aparte) |
 | `auralis-library::watch` (detección de altas/bajas, espera a que termine una copia, carpeta no disponible ≠ vacía) | 3 tests pasan con carpetas temporales reales |
-| **`main.slint` (esta entrega: estrella, filtro ★, historial, panel de audio con ecualizador)** | **NO compilado**: no hay compilador de Slint aquí. Las partes nuevas se revisaron a mano; el riesgo está en detalles de sintaxis/propiedades (p. ej. el deslizador vertical `EqBand`, `Flickable`, `ListView` del historial). Las anteriores sí las compilaste tú |
-| `auralis-core` (cola, shuffle, repeat, tiempo, búsqueda, ajustes, ecualizador/presets, historial, favoritos) | 46 tests pasan |
+| **`main.slint` (esta entrega: cassette, vista de widget, casilla podcast, paneles de ajustes y estadísticas; antes: tema, resplandor, apariencia, estrella, ★, historial, ecualizador)** | **NO compilado**: no hay compilador de Slint aquí. Las partes nuevas se revisaron a mano; el riesgo está en detalles de sintaxis/propiedades (p. ej. el deslizador vertical `EqBand`, `Flickable`, `ListView` del historial). Las anteriores sí las compilaste tú |
+| `auralis-core` (cola, shuffle, repeat, tiempo, búsqueda, ajustes, ecualizador/presets, historial, favoritos, paleta de tema, color dominante, tabla de atajos, **estadísticas y ajustes de widget/podcast/inicio**) | 72 tests pasan (los 10 nuevos: calendario civil, zona horaria, ventanas de tiempo hoy/semana/mes/año, rankings, racha, formato de tiempos, contador de reproducciones, guardado/lectura con texto raro o corrupto, poda). Los de paleta comprueban, para los 360° de matiz × 3 tintes × claro/oscuro, contraste del acento ≥ 3, del texto ≥ 6, y que la luz del relieve siga siendo más clara y la sombra más oscura que el fondo; y que la configuración por defecto reproduce exactamente los colores originales |
 | Ecualizador (`eq.rs`) | 8 pruebas: plano = transparente, ±dB en la banda elegida (medido con senos), bandas lejanas intactas, sin saltos al mover, bypass exacto al desactivar, preamp sin sobrepasar el nivel original con +12 dB en todas las bandas; además 1 prueba con el motor completo (−12 dB a 1 kHz medido a la salida) |
 | ReplayGain (`replaygain.rs`) | 7 pruebas de lectura de etiquetas, desplazamiento de referencia, límite por pico, modo pista/álbum, límites y respaldo a la sonoridad medida; 1 prueba con el motor completo (pista −2 dB, álbum +2 dB). **La lectura de las etiquetas con Symphonia (`reader.rs`) no está compilada contra el crate real** |
 | Fundidos de pausa/cambio de pista (motor real con dispositivo simulado) | 4 pruebas: el fundido de pausa/reanudación dura lo esperado (nivel a la mitad a mitad del fundido, silencio al final, sin escalones), el cambio manual pasa por silencio sin saltos y la pista nueva no se recorta, sin crossfade la pausa es casi inmediata, el seek no espera al crossfade. Las 21 pruebas del motor pasan |
+| **`hotkeys.rs` y la parte nueva de `tray.rs` (`global-hotkey` 0.6, `CheckMenuItem`)** | **NO compilados** (solo existen en Windows y no hay red para bajar las librerías); escritos contra la API documentada. Lo primero que probar: que las teclas multimedia respondan y que el menú de la bandeja muestre la marca de «Aleatorio» |
+| **`autostart.rs`, `localtime.rs`** | Solo Windows (`reg.exe`, `GetTimeZoneInformation`): **no probados en Windows**; en Linux solo se compilan los reemplazos. Lo primero que probar: que «Iniciar con el equipo» cree la entrada en `Run` y que el día de las estadísticas cambie a medianoche local |
 | `main.rs` | Comprobación de tipos y préstamos contra versiones **simuladas** de `slint`, `player`, `library` y `rfd` (sin errores). No es una compilación real |
 | `auralis-audio::converter` (canales, remuestreo sinc, vaciado final) | 11 tests pasan |
 | Motor de audio real (`output`, `decoder_thread`, `engine`) con dispositivo y lector **simulados** | 7 pruebas (más las nuevas de arriba) de comportamiento pasan: empalme gapless 44,1→48 kHz sin saltos ni pérdida de muestras, sin clics al pausar/mover volumen/cambiar de pista, seek, errores, pista corta. Comprobado que fallan con el comportamiento antiguo |

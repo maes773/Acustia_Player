@@ -6,9 +6,12 @@
 
 pub mod eq;
 pub mod history;
+pub mod hotkeys;
 mod queue;
 pub mod search;
 pub mod settings;
+pub mod stats;
+pub mod theme;
 mod time;
 mod track;
 

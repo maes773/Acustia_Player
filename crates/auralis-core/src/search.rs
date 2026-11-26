@@ -77,7 +77,10 @@ mod tests {
     fn normalizes_case_and_accents() {
         assert_eq!(normalize("Canción"), "cancion");
         assert_eq!(normalize("NIÑO"), "nino");
-        assert_eq!(normalize("Ångström Œuvre Straße"), "angstrom oeuvre strasse");
+        assert_eq!(
+            normalize("Ångström Œuvre Straße"),
+            "angstrom oeuvre strasse"
+        );
         assert_eq!(normalize("日本語 123"), "日本語 123");
     }
 

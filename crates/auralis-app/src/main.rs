@@ -13,10 +13,12 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use auralis_core::eq as coreeq;
 use auralis_core::history::ago_text;
+use auralis_core::stats::{self as corestats, ListenTracker, Stats};
+use auralis_core::theme::{self as coretheme, Rgb, Rgba};
 use auralis_core::{format_time, History, Query, Settings, TrackInfo, EQ_CUSTOM};
 use auralis_library::{
     parse_year, prepare_cover, read_cover, read_full_tags, read_metadata, scan_folder, scan_paths,
@@ -26,11 +28,15 @@ use auralis_library::{
 use auralis_player::{Player, Snapshot, Status};
 use slint::{ComponentHandle, Model, VecModel};
 
+mod autostart;
 mod catalog;
+mod hotkeys;
+mod localtime;
 mod power;
 mod tray;
 use catalog::{folder_names, Folder, LoadState, MetaForm};
-use tray::{Tray, TrayAction};
+use hotkeys::{HotkeyAction, Hotkeys};
+use tray::{Tray, TrayAction, TrayState};
 
 slint::include_modules!();
 
@@ -138,8 +144,19 @@ struct AppState {
     /// Último estado conocido del reproductor.
     last_status: Status,
     last_position_ms: u64,
+    last_shuffle: bool,
+    last_repeat: i32,
     /// Se crea la primera vez que se minimiza a la bandeja.
     tray: Option<Tray>,
+    /// Último estado enviado al menú de la bandeja (para no reescribirlo en cada tick).
+    tray_state: Option<TrayState>,
+    /// Atajos globales de teclado (si el sistema los admite).
+    hotkeys: Option<Hotkeys>,
+    /// Color dominante de la carátula que suena (Ambient Light).
+    ambient_color: Option<Rgb>,
+    /// Ticks (de 100 ms) que faltan para guardar los ajustes de apariencia: mientras se
+    /// arrastra un deslizador no se escribe el disco en cada paso.
+    theme_save_in: u32,
     /// Mostrar solo las canciones favoritas de la carpeta vista.
     favorites_only: bool,
     history: History,
@@ -149,7 +166,24 @@ struct AppState {
     /// reconstruir los deslizadores mientras se arrastra uno.
     eq_model: Rc<VecModel<f32>>,
     eq_text_model: Rc<VecModel<slint::SharedString>>,
+    /// Estadísticas de escucha y su archivo.
+    stats: Stats,
+    stats_path: Option<PathBuf>,
+    stats_dirty: bool,
+    tracker: ListenTracker,
+    last_tick: Instant,
+    /// Milisegundos de reproducción aún no convertidos en segundos enteros.
+    listen_ms: u64,
+    /// Tamaño y posición de la ventana normal mientras se está en modo widget.
+    normal_size: Option<slint::LogicalSize>,
+    normal_pos: Option<slint::PhysicalPosition>,
+    /// El widget ya se colocó en su posición guardada (al arrancar en modo widget se
+    /// hace tras mostrar la ventana).
+    widget_placed: bool,
 }
+
+/// Tamaño del widget (px lógicos).
+const WIDGET_SIZE: (f32, f32) = (380.0, 150.0);
 
 /// Ruta del archivo de ajustes: `%APPDATA%\Acustia Player\settings.txt` en Windows.
 /// Si existe la carpeta de la versión anterior (`Auralis`) y aún no la nueva, se copian
@@ -209,6 +243,225 @@ fn save_settings(st: &AppState, ui: &MainWindow) {
     }
 }
 
+/// Archivo de estadísticas, junto a los ajustes.
+fn stats_path(settings: &Option<PathBuf>) -> Option<PathBuf> {
+    settings
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|d| d.join("stats.txt"))
+}
+
+fn save_stats(st: &mut AppState) {
+    if !st.stats_dirty {
+        return;
+    }
+    if let Some(p) = &st.stats_path {
+        if st.stats.save(p).is_ok() {
+            st.stats_dirty = false;
+        }
+    }
+}
+
+/// Casilla «Modo podcast» de la carpeta vista y arte (CD/cassette) de la que suena.
+fn sync_podcast_ui(st: &AppState, ui: &MainWindow) {
+    let selected = st
+        .folders
+        .get(st.selected)
+        .is_some_and(|f| st.settings.is_podcast(&f.path));
+    let now = st
+        .playing_folder
+        .and_then(|id| st.folders.iter().find(|f| f.id == id))
+        .is_some_and(|f| st.settings.is_podcast(&f.path));
+    ui.set_podcast_mode(selected);
+    ui.set_now_podcast(now);
+}
+
+/// Suma el tiempo que lleva sonando la canción actual. Se llama en cada tick (100 ms);
+/// el tiempo en pausa no cuenta y un tick muy largo (app bloqueada) se recorta.
+fn account_listening(st: &mut AppState, s: &Snapshot) {
+    let now = Instant::now();
+    let dt = now
+        .duration_since(st.last_tick)
+        .min(Duration::from_millis(500));
+    st.last_tick = now;
+    if s.status != Status::Playing {
+        return;
+    }
+    // Repetir una canción: la posición vuelve al principio → cuenta como otra reproducción.
+    if let Some(d) = s.duration_ms {
+        if st.last_position_ms + 4000 >= d
+            && s.position_ms < 4000
+            && st.last_position_ms > s.position_ms
+        {
+            st.tracker.reset();
+        }
+    }
+    st.listen_ms += dt.as_millis() as u64;
+    let secs = (st.listen_ms / 1000) as u32;
+    if secs == 0 {
+        return;
+    }
+    st.listen_ms %= 1000;
+    let Some(folder) = st
+        .playing_folder
+        .and_then(|id| st.folders.iter().find(|f| f.id == id))
+    else {
+        return;
+    };
+    let Some(entry) = s.current.and_then(|i| folder.entries.get(i)) else {
+        return;
+    };
+    let podcast = st.settings.is_podcast(&folder.path);
+    let path = entry.info.path.clone();
+    let title = entry.display_title().to_string();
+    let artist = entry.info.artist.clone().unwrap_or_default();
+    st.stats
+        .add_listen(localtime::today(), podcast, &path, &title, &artist, secs);
+    if st.tracker.tick(&path, secs) {
+        st.stats.add_play(&path);
+    }
+    st.stats_dirty = true;
+}
+
+fn stat_row(label: &str, value: String) -> StatRow {
+    StatRow {
+        label: label.into(),
+        value: value.into(),
+    }
+}
+
+/// Rellena el panel de estadísticas.
+fn refresh_stats_ui(st: &AppState, ui: &MainWindow) {
+    use corestats::format_duration as fd;
+    let today = localtime::today();
+    let r = st.stats.summary(today);
+    let (mut music, mut pod) = (0usize, 0usize);
+    for f in &st.folders {
+        if st.settings.is_podcast(&f.path) {
+            pod += f.entries.len();
+        } else {
+            music += f.entries.len();
+        }
+    }
+    let mut rows = vec![
+        stat_row("Escuchado hoy", fd(r.today_secs)),
+        stat_row("Últimos 7 días", fd(r.week_secs)),
+        stat_row("Este mes", fd(r.month_secs)),
+        stat_row("Este año", fd(r.year_secs)),
+        stat_row("Música escuchada (total)", fd(r.total_music_secs)),
+        stat_row("Podcast escuchado (total)", fd(r.total_podcast_secs)),
+        stat_row("Promedio por día con música", fd(r.avg_day_secs)),
+        stat_row("Días con escucha", r.days_listened.to_string()),
+        stat_row("Racha actual", format!("{} días", r.streak_days)),
+        stat_row("Canciones locales (carpetas leídas)", music.to_string()),
+        stat_row("Episodios de podcast (carpetas leídas)", pod.to_string()),
+        stat_row("Reproducciones contadas", r.total_plays.to_string()),
+    ];
+    rows.push(stat_row(
+        "Artista más escuchado",
+        r.top_artist
+            .map(|(n, s)| format!("{n} · {}", fd(s)))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    rows.push(stat_row(
+        "Canción más escuchada",
+        r.top_track
+            .map(|(t, a, n)| {
+                if a.is_empty() {
+                    format!("{t} · {n}×")
+                } else {
+                    format!("{t} — {a} · {n}×")
+                }
+            })
+            .unwrap_or_else(|| "—".into()),
+    ));
+    rows.push(stat_row(
+        "Podcast más escuchado",
+        r.top_podcast
+            .map(|(n, s)| format!("{n} · {}", fd(s)))
+            .unwrap_or_else(|| "—".into()),
+    ));
+    ui.set_stats_summary(Rc::new(VecModel::from(rows)).into());
+
+    let tracks: Vec<StatRow> = st
+        .stats
+        .top_tracks(8)
+        .into_iter()
+        .map(|(t, a, n)| {
+            let label = if a.is_empty() {
+                t
+            } else {
+                format!("{t} — {a}")
+            };
+            stat_row(&label, format!("{n}×"))
+        })
+        .collect();
+    ui.set_stats_top_tracks(Rc::new(VecModel::from(tracks)).into());
+    let artists: Vec<StatRow> = st
+        .stats
+        .top_artists(8)
+        .into_iter()
+        .map(|(n, s)| stat_row(&n, fd(s)))
+        .collect();
+    ui.set_stats_top_artists(Rc::new(VecModel::from(artists)).into());
+
+    let days = st.stats.last_days(today, 14);
+    let max = days.iter().copied().max().unwrap_or(0);
+    let bars: Vec<f32> = days
+        .iter()
+        .map(|&d| if max == 0 { 0.0 } else { d as f32 / max as f32 })
+        .collect();
+    ui.set_stats_bars(Rc::new(VecModel::from(bars)).into());
+    ui.set_stats_bars_caption(format!("Últimos 14 días · máximo {}", fd(max)).into());
+}
+
+/// Entra o sale del modo widget (ventana compacta sin marco que recuerda su sitio).
+fn set_widget_mode(st: &mut AppState, ui: &MainWindow, on: bool) {
+    if ui.get_widget_mode() == on || ui.get_editing() {
+        return;
+    }
+    let w = ui.window();
+    if on {
+        let scale = w.scale_factor();
+        let size = w.size();
+        st.normal_size = Some(slint::LogicalSize::new(
+            size.width as f32 / scale,
+            size.height as f32 / scale,
+        ));
+        st.normal_pos = Some(w.position());
+        ui.set_settings_open(false);
+        ui.set_stats_open(false);
+        ui.set_history_open(false);
+        ui.set_audio_open(false);
+        ui.set_appearance_open(false);
+        ui.set_widget_mode(true);
+        w.set_size(slint::LogicalSize::new(WIDGET_SIZE.0, WIDGET_SIZE.1));
+        place_widget(st, ui);
+        st.widget_placed = true;
+    } else {
+        let p = w.position();
+        st.settings.widget_pos = Some((p.x, p.y));
+        ui.set_widget_mode(false);
+        let size = st
+            .normal_size
+            .unwrap_or_else(|| slint::LogicalSize::new(1060.0, 680.0));
+        w.set_size(size);
+        if let Some(p) = st.normal_pos {
+            w.set_position(p);
+        }
+        schedule_theme_save(st);
+    }
+}
+
+/// Mueve el widget a su última posición (si hay una razonable guardada).
+fn place_widget(st: &AppState, ui: &MainWindow) {
+    if let Some((x, y)) = st.settings.widget_pos {
+        if x > -8000 && y > -8000 {
+            ui.window().set_position(slint::PhysicalPosition::new(x, y));
+        }
+    }
+}
+
 fn minimize_to_tray(st: &mut AppState, ui: &MainWindow) {
     if st.tray.is_none() {
         match Tray::new() {
@@ -230,6 +483,217 @@ fn restore_from_tray(st: &AppState, ui: &MainWindow) {
     let _ = ui.show();
     if let Some(t) = &st.tray {
         t.set_visible(false);
+    }
+}
+
+fn to_color(c: Rgba) -> slint::Color {
+    slint::Color::from_argb_u8(c.a, c.r, c.g, c.b)
+}
+
+/// Calcula la paleta (modo + acento + tinte + Ambient Light) y la escribe en el tema de la UI.
+fn apply_palette(st: &AppState, ui: &MainWindow) {
+    let ambient = if st.settings.ambient {
+        st.ambient_color
+    } else {
+        None
+    };
+    let p = coretheme::palette(
+        st.settings.dark,
+        st.settings.theme_hue as f32,
+        st.settings.theme_tint as f32 / 100.0,
+        ambient,
+    );
+    let t = ui.global::<Theme>();
+    t.set_dark(st.settings.dark);
+    t.set_bg(to_color(p.bg));
+    t.set_light(to_color(p.light));
+    t.set_shadow(to_color(p.shadow));
+    t.set_text(to_color(p.text));
+    t.set_text_dim(to_color(p.text_dim));
+    t.set_accent(to_color(p.accent));
+    t.set_inset_top(to_color(p.inset_top));
+    t.set_inset_bottom(to_color(p.inset_bottom));
+    t.set_inset_border(to_color(p.inset_border));
+    t.set_row_current(to_color(p.row_current));
+    t.set_row_hover(to_color(p.row_hover));
+    t.set_glow(to_color(p.glow));
+    t.set_glow_fade(to_color(p.glow_fade));
+    ui.set_ambient_active(ambient.is_some());
+}
+
+/// Refleja matiz, tinte y preset de los ajustes en los controles del panel de apariencia.
+fn sync_theme_controls(st: &AppState, ui: &MainWindow) {
+    ui.set_theme_hue(st.settings.theme_hue as f32 / 359.0);
+    ui.set_theme_tint(st.settings.theme_tint as f32 / 100.0);
+    let preset = coretheme::identify_theme(st.settings.theme_hue, st.settings.theme_tint);
+    ui.set_theme_preset(if preset == coretheme::THEME_CUSTOM {
+        -1
+    } else {
+        preset as i32
+    });
+}
+
+/// Los colores de los presets según el modo (el acento que tendría cada uno).
+fn preset_swatches(dark: bool) -> Vec<slint::Color> {
+    (0..coretheme::preset_count())
+        .filter_map(coretheme::preset_values)
+        .map(|(h, _)| to_color(coretheme::palette(dark, h as f32, 0.0, None).accent))
+        .collect()
+}
+
+/// Cambios de apariencia hechos con deslizadores: se aplican al momento y se guardan en
+/// cuanto el usuario deja de moverlos.
+fn schedule_theme_save(st: &mut AppState) {
+    st.theme_save_in = 8;
+}
+
+/// Texto breve de los atajos para el panel (la tabla completa está en `auralis-core`).
+const HOTKEYS_HELP: &str = "Teclas multimedia (reproducir/pausar, siguiente, anterior, detener) · \
+Ctrl+Alt+Espacio reproducir/pausar · Ctrl+Alt+→ / ← siguiente / anterior · \
+Ctrl+Alt+↑ / ↓ volumen · Ctrl+Alt+S aleatorio · Ctrl+Alt+R repetir · \
+Ctrl+Alt+A mostrar la ventana";
+
+fn hotkeys_status(st: &AppState) -> String {
+    if !st.settings.hotkeys {
+        return String::new();
+    }
+    match &st.hotkeys {
+        None if !cfg!(windows) => "Los atajos globales solo están disponibles en Windows.".into(),
+        None => "No se pudieron activar los atajos globales.".into(),
+        Some(h) if h.failed().is_empty() => String::new(),
+        Some(h) => format!(
+            "Otra aplicación ya usa: {}. Esos atajos no funcionarán.",
+            h.failed().join(", ")
+        ),
+    }
+}
+
+/// Acción pedida desde la bandeja o un atajo global.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Command {
+    PlayPause,
+    Pause,
+    Next,
+    Previous,
+    Shuffle,
+    Repeat,
+    VolumeUp,
+    VolumeDown,
+    Show,
+    Quit,
+}
+
+impl From<TrayAction> for Command {
+    fn from(a: TrayAction) -> Self {
+        match a {
+            TrayAction::Show => Command::Show,
+            TrayAction::TogglePlay => Command::PlayPause,
+            TrayAction::Next => Command::Next,
+            TrayAction::Previous => Command::Previous,
+            TrayAction::ToggleShuffle => Command::Shuffle,
+            TrayAction::CycleRepeat => Command::Repeat,
+            TrayAction::Quit => Command::Quit,
+        }
+    }
+}
+
+impl From<HotkeyAction> for Command {
+    fn from(a: HotkeyAction) -> Self {
+        match a {
+            HotkeyAction::PlayPause => Command::PlayPause,
+            HotkeyAction::Next => Command::Next,
+            HotkeyAction::Previous => Command::Previous,
+            HotkeyAction::Stop => Command::Pause,
+            HotkeyAction::VolumeUp => Command::VolumeUp,
+            HotkeyAction::VolumeDown => Command::VolumeDown,
+            HotkeyAction::ToggleShuffle => Command::Shuffle,
+            HotkeyAction::CycleRepeat => Command::Repeat,
+            HotkeyAction::ShowWindow => Command::Show,
+        }
+    }
+}
+
+/// Ejecuta una acción sobre el reproductor. La interfaz se actualiza sola en el siguiente tick
+/// (instantánea del reproductor), salvo el volumen, que vive en la propia ventana.
+fn run_command(st: &mut AppState, ui: &MainWindow, cmd: Command) {
+    match cmd {
+        Command::Show => restore_from_tray(st, ui),
+        Command::Quit => {
+            let _ = slint::quit_event_loop();
+        }
+        Command::VolumeUp | Command::VolumeDown => {
+            let step = if cmd == Command::VolumeUp {
+                0.05
+            } else {
+                -0.05
+            };
+            let v = (ui.get_volume() + step).clamp(0.0, 1.0);
+            ui.set_volume(v);
+            if let Some(p) = st.player.as_mut() {
+                p.set_volume(v);
+            }
+        }
+        _ => {
+            let status = st.last_status;
+            let Some(p) = st.player.as_mut() else { return };
+            match cmd {
+                Command::PlayPause => p.toggle_play_pause(),
+                Command::Pause => {
+                    if status == Status::Playing {
+                        p.toggle_play_pause();
+                    }
+                }
+                Command::Next => p.next(),
+                Command::Previous => p.previous(),
+                Command::Shuffle => p.toggle_shuffle(),
+                Command::Repeat => {
+                    p.cycle_repeat();
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Activa o desactiva los atajos globales según los ajustes (primera vez: los crea).
+fn apply_hotkeys(st: &mut AppState, ui: &MainWindow) {
+    if st.settings.hotkeys {
+        match st.hotkeys.as_mut() {
+            Some(h) => h.enable(),
+            None => st.hotkeys = Hotkeys::new().ok(),
+        }
+    } else if let Some(h) = st.hotkeys.as_mut() {
+        h.disable();
+    }
+    ui.set_hotkeys_enabled(st.settings.hotkeys);
+    ui.set_hotkeys_status(hotkeys_status(st).into());
+}
+
+/// Mantiene el menú de la bandeja al día (solo escribe si algo cambió).
+fn sync_tray(st: &mut AppState) {
+    let Some(t) = st.tray.as_ref() else { return };
+    let now_playing = st
+        .playing_folder
+        .and_then(|id| st.folders.iter().find(|f| f.id == id))
+        .and_then(|f| st.shown_current.and_then(|i| f.entries.get(i)))
+        .map(|e| {
+            let artist = e.info.artist.as_deref().unwrap_or("");
+            if artist.is_empty() {
+                e.display_title().to_string()
+            } else {
+                format!("{} — {artist}", e.display_title())
+            }
+        })
+        .unwrap_or_default();
+    let now = TrayState {
+        playing: st.last_status == Status::Playing,
+        shuffle: st.last_shuffle,
+        repeat: st.last_repeat,
+        now_playing,
+    };
+    if st.tray_state.as_ref() != Some(&now) {
+        t.set_state(&now);
+        st.tray_state = Some(now);
     }
 }
 
@@ -424,10 +888,12 @@ fn refresh_folders(st: &AppState, ui: &MainWindow) {
             count: f.entries.len() as i32,
             playing: st.playing_folder == Some(f.id),
             missing: f.state == LoadState::Missing,
+            podcast: st.settings.is_podcast(&f.path),
         })
         .collect();
     st.folder_model.set_vec(items);
     ui.set_selected_folder(st.selected as i32);
+    sync_podcast_ui(st, ui);
 }
 
 /// Reconstruye la lista de canciones de la carpeta vista aplicando la búsqueda.
@@ -635,6 +1101,7 @@ fn remove_folder(st: &mut AppState, ui: &MainWindow, idx: usize) {
 
 /// Título, artista y (si `reset_cover`) carátula del reproductor principal.
 fn set_now_playing(st: &AppState, ui: &MainWindow, reset_cover: bool) {
+    sync_podcast_ui(st, ui);
     let entry = st
         .playing_folder
         .and_then(|id| st.folders.iter().find(|f| f.id == id))
@@ -800,6 +1267,8 @@ fn apply_snapshot(st: &mut AppState, ui: &MainWindow, s: &Snapshot) {
     st.duration_ms = s.duration_ms;
     st.last_status = s.status;
     st.last_position_ms = s.position_ms;
+    st.last_shuffle = s.shuffle;
+    st.last_repeat = s.repeat.as_index();
     ui.set_playing(s.status == Status::Playing);
     ui.set_shuffle(s.shuffle);
     ui.set_repeat_mode(s.repeat.as_index());
@@ -1225,9 +1694,19 @@ fn drain_covers(st: &mut AppState, ui: &MainWindow) {
         if Some(index) != st.shown_current || Some(id) != st.playing_folder {
             continue; // llegó tarde: ya hay otra pista
         }
+        let ambient = cover
+            .as_ref()
+            .and_then(|c| coretheme::dominant_color(&c.rgba, c.width as usize, c.height as usize));
         if let Some(c) = cover {
             ui.set_current_cover(to_image(&c));
             ui.set_has_cover(true);
+        }
+        // Sin carátula (o gris) no hay color que seguir: se vuelve al tema elegido.
+        if ambient != st.ambient_color {
+            st.ambient_color = ambient;
+            if st.settings.ambient {
+                apply_palette(st, ui);
+            }
         }
     }
 }
@@ -1252,7 +1731,6 @@ fn main() -> Result<(), slint::PlatformError> {
         ),
         None => (Settings::default(), None),
     };
-    ui.global::<Theme>().set_dark(settings.dark);
     ui.set_normalize(settings.normalize);
     ui.set_crossfade_secs(settings.crossfade_secs as i32);
 
@@ -1290,6 +1768,27 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.set_eq_band_names(Rc::new(VecModel::from(band_names)).into());
     ui.set_replaygain_album(settings.replaygain_album);
 
+    let stats_path = stats_path(&settings_path);
+    let stats = stats_path
+        .as_deref()
+        .and_then(|p| Stats::load(p).ok())
+        .unwrap_or_default();
+    ui.set_widget_on_start(settings.widget_on_start);
+    ui.set_widget_on_top(settings.widget_on_top);
+    ui.set_autostart(settings.autostart);
+    if !autostart::supported() {
+        ui.set_autostart_status("El inicio con el equipo solo funciona en Windows.".into());
+    } else if settings.autostart {
+        // Renueva la ruta registrada por si se movió el programa (en segundo plano).
+        std::thread::spawn(|| {
+            let _ = autostart::set(true);
+        });
+    }
+    // Arrancar en modo widget: la ventana nace ya compacta y sin marco.
+    if settings.widget_on_start {
+        ui.set_widget_mode(true);
+    }
+
     let (cover_tx, cover_rx) = mpsc::channel();
     let (tag_tx, tag_rx) = mpsc::channel();
     let state = Rc::new(RefCell::new(AppState {
@@ -1316,14 +1815,29 @@ fn main() -> Result<(), slint::PlatformError> {
         tag_rx,
         watchers: Vec::new(),
         last_status: Status::Stopped,
+        last_shuffle: false,
+        last_repeat: 0,
         last_position_ms: 0,
         tray: None,
+        tray_state: None,
+        hotkeys: None,
+        ambient_color: None,
+        theme_save_in: 0,
         favorites_only: false,
         history,
         history_path,
         history_model,
         eq_model,
         eq_text_model,
+        stats,
+        stats_path,
+        stats_dirty: false,
+        tracker: ListenTracker::default(),
+        last_tick: Instant::now(),
+        listen_ms: 0,
+        normal_size: None,
+        normal_pos: None,
+        widget_placed: false,
     }));
     {
         let mut st = state.borrow_mut();
@@ -1345,6 +1859,20 @@ fn main() -> Result<(), slint::PlatformError> {
             p.set_normalize(normalize);
         }
         sync_eq_ui(&st, &ui);
+        // Apariencia: paleta inicial (sin animar para no ver un destello), presets y atajos.
+        ui.set_ambient(st.settings.ambient);
+        let names: Vec<slint::SharedString> = coretheme::preset_names()
+            .into_iter()
+            .map(Into::into)
+            .collect();
+        ui.set_theme_preset_names(Rc::new(VecModel::from(names)).into());
+        ui.set_theme_preset_colors(
+            Rc::new(VecModel::from(preset_swatches(st.settings.dark))).into(),
+        );
+        sync_theme_controls(&st, &ui);
+        apply_palette(&st, &ui);
+        ui.set_hotkeys_help(HOTKEYS_HELP.into());
+        apply_hotkeys(&mut st, &ui);
         let idx = st.selected;
         show_folder(&mut st, &ui, idx);
         if let Some(msg) = init_error.or(load_error) {
@@ -1417,8 +1945,96 @@ fn main() -> Result<(), slint::PlatformError> {
             if let Some(ui) = weak.upgrade() {
                 let mut st = state.borrow_mut();
                 st.settings.dark = dark;
+                ui.set_theme_preset_colors(Rc::new(VecModel::from(preset_swatches(dark))).into());
+                apply_palette(&st, &ui);
                 save_settings(&st, &ui);
             }
+        }
+    });
+    ui.on_ambient_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.ambient = on;
+            apply_palette(&st, &ui);
+            save_settings(&st, &ui);
+        }
+    });
+    ui.on_theme_preset_selected({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            if let Some((h, t)) = coretheme::preset_values(i.max(0) as usize) {
+                st.settings.theme_hue = h;
+                st.settings.theme_tint = t;
+                sync_theme_controls(&st, &ui);
+                apply_palette(&st, &ui);
+                save_settings(&st, &ui);
+            }
+        }
+    });
+    ui.on_theme_hue_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |v| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.theme_hue = (v.clamp(0.0, 1.0) * 359.0).round() as u16;
+            let preset = coretheme::identify_theme(st.settings.theme_hue, st.settings.theme_tint);
+            ui.set_theme_preset(if preset == coretheme::THEME_CUSTOM {
+                -1
+            } else {
+                preset as i32
+            });
+            apply_palette(&st, &ui);
+            schedule_theme_save(&mut st);
+        }
+    });
+    ui.on_theme_tint_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |v| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.theme_tint = (v.clamp(0.0, 1.0) * 100.0).round() as u8;
+            let preset = coretheme::identify_theme(st.settings.theme_hue, st.settings.theme_tint);
+            ui.set_theme_preset(if preset == coretheme::THEME_CUSTOM {
+                -1
+            } else {
+                preset as i32
+            });
+            apply_palette(&st, &ui);
+            schedule_theme_save(&mut st);
+        }
+    });
+    ui.on_theme_reset({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            if let Some((h, t)) = coretheme::preset_values(0) {
+                st.settings.theme_hue = h;
+                st.settings.theme_tint = t;
+            }
+            sync_theme_controls(&st, &ui);
+            apply_palette(&st, &ui);
+            save_settings(&st, &ui);
+        }
+    });
+    ui.on_hotkeys_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |on| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            st.settings.hotkeys = on;
+            apply_hotkeys(&mut st, &ui);
+            save_settings(&st, &ui);
         }
     });
     ui.on_normalize_changed({
@@ -1760,6 +2376,115 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    ui.on_widget_toggle({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                let on = !ui.get_widget_mode();
+                set_widget_mode(&mut state.borrow_mut(), &ui, on);
+            }
+        }
+    });
+    ui.on_widget_drag({
+        let weak = ui.as_weak();
+        move |dx, dy| {
+            if let Some(ui) = weak.upgrade() {
+                let w = ui.window();
+                let scale = w.scale_factor();
+                let p = w.position();
+                w.set_position(slint::PhysicalPosition::new(
+                    p.x + (dx * scale).round() as i32,
+                    p.y + (dy * scale).round() as i32,
+                ));
+            }
+        }
+    });
+    ui.on_widget_on_start_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |v| {
+            if let Some(ui) = weak.upgrade() {
+                let mut st = state.borrow_mut();
+                st.settings.widget_on_start = v;
+                ui.set_widget_on_start(v);
+                save_settings(&st, &ui);
+            }
+        }
+    });
+    ui.on_widget_on_top_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |v| {
+            if let Some(ui) = weak.upgrade() {
+                let mut st = state.borrow_mut();
+                st.settings.widget_on_top = v;
+                ui.set_widget_on_top(v);
+                save_settings(&st, &ui);
+            }
+        }
+    });
+    ui.on_autostart_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |v| {
+            if let Some(ui) = weak.upgrade() {
+                let mut st = state.borrow_mut();
+                match autostart::set(v) {
+                    Ok(()) => {
+                        st.settings.autostart = v;
+                        ui.set_autostart(v);
+                        ui.set_autostart_status("".into());
+                        save_settings(&st, &ui);
+                    }
+                    Err(e) => {
+                        ui.set_autostart_status(format!("No se pudo cambiar: {e}").into());
+                    }
+                }
+            }
+        }
+    });
+    ui.on_podcast_changed({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |v| {
+            if let Some(ui) = weak.upgrade() {
+                let mut st = state.borrow_mut();
+                let Some(path) = st.folders.get(st.selected).map(|f| f.path.clone()) else {
+                    return;
+                };
+                st.settings.set_podcast(&path, v);
+                save_settings(&st, &ui);
+                refresh_folders(&st, &ui);
+            }
+        }
+    });
+    ui.on_stats_opened({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut st = state.borrow_mut();
+                save_stats(&mut st);
+                refresh_stats_ui(&st, &ui);
+            }
+        }
+    });
+    ui.on_stats_reset({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut st = state.borrow_mut();
+                st.stats = Stats::default();
+                st.tracker.reset();
+                st.stats_dirty = true;
+                save_stats(&mut st);
+                refresh_stats_ui(&st, &ui);
+            }
+        }
+    });
+
     ui.on_minimize_to_tray({
         let state = state.clone();
         let weak = ui.as_weak();
@@ -1789,21 +2514,49 @@ fn main() -> Result<(), slint::PlatformError> {
             ticks += 1;
             if ticks % 300 == 0 {
                 save_loudness(&st);
+                save_stats(&mut st);
+                if ui.get_stats_open() {
+                    refresh_stats_ui(&st, &ui);
+                }
+            }
+            // Modo widget: colocarlo tras mostrar la ventana y recordar dónde se suelta.
+            if ui.get_widget_mode() {
+                if !st.widget_placed {
+                    if ticks >= 2 {
+                        let w = ui.window();
+                        w.set_size(slint::LogicalSize::new(WIDGET_SIZE.0, WIDGET_SIZE.1));
+                        place_widget(&st, &ui);
+                        st.widget_placed = true;
+                    }
+                } else {
+                    let p = ui.window().position();
+                    if st.settings.widget_pos != Some((p.x, p.y)) {
+                        st.settings.widget_pos = Some((p.x, p.y));
+                        schedule_theme_save(&mut st);
+                    }
+                }
             }
 
             // Acciones del icono de bandeja (siguen funcionando con la ventana oculta).
-            let actions = st.tray.as_ref().map(|t| t.poll()).unwrap_or_default();
-            for action in actions {
-                match action {
-                    TrayAction::Show => restore_from_tray(&st, &ui),
-                    TrayAction::TogglePlay => {
-                        if let Some(p) = st.player.as_mut() {
-                            p.toggle_play_pause();
-                        }
-                    }
-                    TrayAction::Quit => {
-                        let _ = slint::quit_event_loop();
-                    }
+            let mut commands: Vec<Command> = st
+                .tray
+                .as_ref()
+                .map(|t| t.poll())
+                .unwrap_or_default()
+                .into_iter()
+                .map(Command::from)
+                .collect();
+            // Atajos globales de teclado (también con la ventana en la bandeja).
+            if let Some(h) = st.hotkeys.as_ref() {
+                commands.extend(h.poll().into_iter().map(Command::from));
+            }
+            for cmd in commands {
+                run_command(&mut st, &ui, cmd);
+            }
+            if st.theme_save_in > 0 {
+                st.theme_save_in -= 1;
+                if st.theme_save_in == 0 {
+                    save_settings(&st, &ui);
                 }
             }
 
@@ -1813,8 +2566,10 @@ fn main() -> Result<(), slint::PlatformError> {
             drain_covers(&mut st, &ui);
             let snapshot = st.player.as_mut().map(|p| p.tick());
             if let Some(s) = snapshot {
+                account_listening(&mut st, &s);
                 apply_snapshot(&mut st, &ui, &s);
             }
+            sync_tray(&mut st);
             if ui.get_show_debug() {
                 if let Some(p) = st.player.as_ref() {
                     ui.set_debug_text(p.diagnostics().into());
@@ -1823,10 +2578,29 @@ fn main() -> Result<(), slint::PlatformError> {
         }
     });
 
+    // Los fundidos entre paletas se activan después del primer fotograma.
+    let fade_timer = slint::Timer::default();
+    fade_timer.start(slint::TimerMode::SingleShot, Duration::from_millis(400), {
+        let weak = ui.as_weak();
+        move || {
+            if let Some(ui) = weak.upgrade() {
+                ui.global::<Theme>().set_fade_ms(600);
+            }
+        }
+    });
+
     // `run_event_loop_until_quit` mantiene la aplicación viva con la ventana
     // oculta (bandeja); sale con `quit_event_loop`.
     ui.show()?;
     let result = slint::run_event_loop_until_quit();
+    {
+        // Ajustes de apariencia pendientes (deslizador movido justo antes de salir).
+        let st = state.borrow();
+        if let Some(path) = &st.settings_path {
+            let _ = st.settings.save(path);
+        }
+    }
     save_loudness(&state.borrow());
+    save_stats(&mut state.borrow_mut());
     result
 }

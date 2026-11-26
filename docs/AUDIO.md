@@ -196,3 +196,23 @@ Datos puros en `auralis-core`: `Settings::favorites` (conjunto de rutas, línea 
 (`history.txt`, una línea por canción: hora, ruta, título y artista tal como se veían, hasta 300). El historial no
 duplica la misma canción consecutiva (recargas al editar o al cambiar de dispositivo), solo refresca su título.
 
+## Apariencia, Ambient Light y atajos
+
+Nada de esto toca el motor de audio. La paleta (`auralis-core::theme::palette`) se calcula en Rust a partir de
+(modo, matiz, tinte, color de Ambient Light) y se escribe en el `global Theme` de Slint; con valores por defecto
+devuelve exactamente la paleta original. El color dominante (`dominant_color`) se obtiene de la carátula grande
+que la app ya lee para el CD (en el hilo de la interfaz, ~4000 muestras). Los atajos globales usan `global-hotkey`
+(RegisterHotKey en Windows) y se leen en el mismo temporizador de 100 ms que la bandeja, por lo que siguen
+funcionando con la ventana oculta; el menú de la bandeja solo se reescribe cuando cambia el estado del reproductor.
+
+
+## Estadísticas, widget y modo podcast
+
+Nada de esto toca el motor de audio. `auralis-core::stats` guarda, por día, los segundos de música y de podcast y,
+por canción, reproducciones, segundos, título y artista (`stats.txt`, texto con tabuladores). El temporizador de
+100 ms de la interfaz suma el tiempo real transcurrido (recortado a 500 ms por tick) solo si el estado es
+«reproduciendo»; los segundos se atribuyen a la canción de la carpeta que suena y a su modo (música/podcast).
+`ListenTracker` cuenta una reproducción a los 30 s y se reinicia si la posición vuelve al principio (repetir una
+canción). El archivo se guarda cada ~30 s si hay cambios y al salir. El día local sale de segundos Unix + desfase
+de `GetTimeZoneInformation`. El modo widget es la misma ventana en otro estado (`widget-mode`: sin marco, 380×150);
+arrastrarlo mueve la ventana con `set_position` y su posición se guarda con un retardo, igual que los ajustes de tema.

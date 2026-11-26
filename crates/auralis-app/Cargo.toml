@@ -22,6 +22,8 @@ rfd = "0.15"
 [target.'cfg(windows)'.dependencies]
 # Icono de bandeja del sistema (solo Windows en esta versión).
 tray-icon = "0.19"
+# Atajos globales de teclado y teclas multimedia (solo Windows en esta versión).
+global-hotkey = "0.6"
 # Decodifica el PNG del logo para el icono de la bandeja (solo PNG, sin extras).
 image = { version = "0.25", default-features = false, features = ["png"] }
 

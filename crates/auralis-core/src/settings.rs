@@ -23,6 +23,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::eq::{clamp_tenths, identify_preset, preset_gains, EqGains, EQ_BANDS};
+use crate::theme::DEFAULT_HUE;
 
 pub const SETTINGS_VERSION: u32 = 1;
 
@@ -52,6 +53,24 @@ pub struct Settings {
     pub eq_gains: EqGains,
     /// Canciones favoritas (por ruta de archivo).
     pub favorites: BTreeSet<PathBuf>,
+    /// Matiz del color de acento (0–359).
+    pub theme_hue: u16,
+    /// Cuánto se tiñe el fondo con ese matiz (0–100).
+    pub theme_tint: u8,
+    /// Ambient Light: los colores de la interfaz siguen la carátula que suena.
+    pub ambient: bool,
+    /// Atajos globales de teclado activados.
+    pub hotkeys: bool,
+    /// Carpetas marcadas como «modo podcast» (el resto es modo música).
+    pub podcast_folders: Vec<PathBuf>,
+    /// Abrir siempre en modo widget.
+    pub widget_on_start: bool,
+    /// El widget se mantiene por encima de las demás ventanas.
+    pub widget_on_top: bool,
+    /// Última posición del widget en pantalla (esquina superior izquierda, píxeles físicos).
+    pub widget_pos: Option<(i32, i32)>,
+    /// Iniciar Acustia con el equipo (se aplica en el registro de Windows).
+    pub autostart: bool,
 }
 
 impl Default for Settings {
@@ -67,6 +86,15 @@ impl Default for Settings {
             eq_enabled: false,
             eq_gains: [0; EQ_BANDS],
             favorites: BTreeSet::new(),
+            theme_hue: DEFAULT_HUE,
+            theme_tint: 0,
+            ambient: true,
+            hotkeys: true,
+            podcast_folders: Vec::new(),
+            widget_on_start: false,
+            widget_on_top: false,
+            widget_pos: None,
+            autostart: false,
         }
     }
 }
@@ -160,6 +188,37 @@ impl Settings {
                         s.eq_gains.copy_from_slice(&v);
                     }
                 }
+                "theme_hue" => {
+                    if let Ok(v) = value.trim().parse::<u16>() {
+                        s.theme_hue = v % 360;
+                    }
+                }
+                "theme_tint" => {
+                    if let Ok(v) = value.trim().parse::<u8>() {
+                        s.theme_tint = v.min(100);
+                    }
+                }
+                "ambient" => s.ambient = value.trim() != "0",
+                "hotkeys" => s.hotkeys = value.trim() != "0",
+                "widget_on_start" => s.widget_on_start = value.trim() == "1",
+                "widget_on_top" => s.widget_on_top = value.trim() == "1",
+                "autostart" => s.autostart = value.trim() == "1",
+                "widget_pos" => {
+                    s.widget_pos = value.split_once(',').and_then(|(x, y)| {
+                        let x = x.trim().parse::<i32>().ok()?;
+                        let y = y.trim().parse::<i32>().ok()?;
+                        // Descarta valores absurdos (monitores desconectados, basura).
+                        (x.abs() < 100_000 && y.abs() < 100_000).then_some((x, y))
+                    })
+                }
+                "podcast" => {
+                    let path = PathBuf::from(unescape(value));
+                    if !path.as_os_str().is_empty()
+                        && !s.podcast_folders.iter().any(|f| same_path(f, &path))
+                    {
+                        s.podcast_folders.push(path);
+                    }
+                }
                 "fav" => {
                     let path = PathBuf::from(unescape(value));
                     if !path.as_os_str().is_empty() {
@@ -212,6 +271,23 @@ impl Settings {
                 .collect::<Vec<_>>()
                 .join(",")
         ));
+        out.push_str(&format!(
+            "theme_hue={}\ntheme_tint={}\nambient={}\nhotkeys={}\n",
+            self.theme_hue % 360,
+            self.theme_tint.min(100),
+            self.ambient as u8,
+            self.hotkeys as u8
+        ));
+        out.push_str(&format!(
+            "widget_on_start={}\nwidget_on_top={}\nautostart={}\n",
+            self.widget_on_start as u8, self.widget_on_top as u8, self.autostart as u8
+        ));
+        if let Some((x, y)) = self.widget_pos {
+            out.push_str(&format!("widget_pos={x},{y}\n"));
+        }
+        for f in &self.podcast_folders {
+            out.push_str(&format!("podcast={}\n", escape(&f.to_string_lossy())));
+        }
         for f in &self.favorites {
             out.push_str(&format!("fav={}\n", escape(&f.to_string_lossy())));
         }
@@ -291,6 +367,19 @@ impl Settings {
 
     pub fn is_favorite(&self, file: &Path) -> bool {
         self.favorites.contains(file)
+    }
+
+    /// ¿Esta carpeta está en modo podcast?
+    pub fn is_podcast(&self, folder: &Path) -> bool {
+        self.podcast_folders.iter().any(|f| same_path(f, folder))
+    }
+
+    /// Cambia el modo (música/podcast) de una carpeta.
+    pub fn set_podcast(&mut self, folder: &Path, on: bool) {
+        self.podcast_folders.retain(|f| !same_path(f, folder));
+        if on {
+            self.podcast_folders.push(folder.to_path_buf());
+        }
     }
 
     /// Alterna el favorito de `file`; devuelve el estado nuevo.
@@ -569,5 +658,45 @@ mod tests {
             preset_gains(3).unwrap()
         );
         assert_eq!(Settings::parse("eq_preset=99\n").eq_gains, [0; EQ_BANDS]);
+    }
+
+    #[test]
+    fn appearance_and_hotkey_settings_roundtrip_and_validate() {
+        let mut s = Settings::default();
+        assert!(s.ambient && s.hotkeys && s.theme_tint == 0 && s.theme_hue == DEFAULT_HUE);
+        s.theme_hue = 14;
+        s.theme_tint = 60;
+        s.ambient = false;
+        s.hotkeys = false;
+        assert_eq!(Settings::parse(&s.to_text()), s);
+        // Archivos de versiones anteriores: valores por defecto (ambient y atajos activados).
+        let old = Settings::parse("dark=1\n");
+        assert!(old.ambient && old.hotkeys && old.theme_hue == DEFAULT_HUE);
+        // Valores fuera de rango o basura.
+        let v = Settings::parse("theme_hue=725\ntheme_tint=250\n");
+        assert_eq!((v.theme_hue, v.theme_tint), (5, 100));
+        let v = Settings::parse("theme_hue=abc\ntheme_tint=-4\n");
+        assert_eq!((v.theme_hue, v.theme_tint), (DEFAULT_HUE, 0));
+    }
+
+    #[test]
+    fn widget_podcast_and_autostart_roundtrip_and_validate() {
+        let mut s = Settings::default();
+        assert!(!s.widget_on_start && !s.autostart && s.widget_pos.is_none());
+        s.widget_on_start = true;
+        s.autostart = true;
+        s.widget_on_top = true;
+        s.widget_pos = Some((-1200, 40));
+        s.set_podcast(Path::new("/pod"), true);
+        s.set_podcast(Path::new("/pod/"), true); // misma carpeta: no se duplica
+        assert_eq!(s.podcast_folders.len(), 1);
+        assert!(s.is_podcast(Path::new("/pod")));
+        assert!(!s.is_podcast(Path::new("/music")));
+        let r = Settings::parse(&s.to_text());
+        assert_eq!(r, s);
+        s.set_podcast(Path::new("/pod"), false);
+        assert!(!s.is_podcast(Path::new("/pod")));
+        let g = Settings::parse("widget_pos=abc\nwidget_pos=9999999,1\nwidget_pos=3\n");
+        assert_eq!(g.widget_pos, None);
     }
 }
