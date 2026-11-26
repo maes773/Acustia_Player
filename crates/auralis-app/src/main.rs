@@ -30,6 +30,7 @@ use slint::{ComponentHandle, Model, VecModel};
 
 mod autostart;
 mod catalog;
+mod gadget;
 mod hotkeys;
 mod localtime;
 mod power;
@@ -180,10 +181,12 @@ struct AppState {
     /// El widget ya se colocó en su posición guardada (al arrancar en modo widget se
     /// hace tras mostrar la ventana).
     widget_placed: bool,
+    /// El comportamiento nativo de gadget (sin barra de tareas, al fondo) está aplicado.
+    gadget_applied: bool,
 }
 
 /// Tamaño del widget (px lógicos).
-const WIDGET_SIZE: (f32, f32) = (380.0, 150.0);
+const WIDGET_SIZE: (f32, f32) = (340.0, 150.0);
 
 /// Ruta del archivo de ajustes: `%APPDATA%\Acustia Player\settings.txt` en Windows.
 /// Si existe la carpeta de la versión anterior (`Auralis`) y aún no la nueva, se copian
@@ -889,8 +892,10 @@ fn refresh_folders(st: &AppState, ui: &MainWindow) {
             playing: st.playing_folder == Some(f.id),
             missing: f.state == LoadState::Missing,
             podcast: st.settings.is_podcast(&f.path),
+            loaded: f.state == LoadState::Ready,
         })
         .collect();
+    ui.set_loaded_folder_count(items.iter().filter(|f| f.loaded && !f.missing).count() as i32);
     st.folder_model.set_vec(items);
     ui.set_selected_folder(st.selected as i32);
     sync_podcast_ui(st, ui);
@@ -1100,8 +1105,22 @@ fn remove_folder(st: &mut AppState, ui: &MainWindow, idx: usize) {
 }
 
 /// Título, artista y (si `reset_cover`) carátula del reproductor principal.
+/// Ruta de la canción que suena (según lo que muestra la interfaz).
+fn playing_path(st: &AppState) -> Option<PathBuf> {
+    st.playing_folder
+        .and_then(|id| st.folders.iter().find(|f| f.id == id))
+        .and_then(|f| st.shown_current.and_then(|i| f.entries.get(i)))
+        .map(|e| e.info.path.clone())
+}
+
+fn sync_current_favorite(st: &AppState, ui: &MainWindow) {
+    let fav = playing_path(st).is_some_and(|p| st.settings.is_favorite(&p));
+    ui.set_current_favorite(fav);
+}
+
 fn set_now_playing(st: &AppState, ui: &MainWindow, reset_cover: bool) {
     sync_podcast_ui(st, ui);
+    sync_current_favorite(st, ui);
     let entry = st
         .playing_folder
         .and_then(|id| st.folders.iter().find(|f| f.id == id))
@@ -1838,6 +1857,7 @@ fn main() -> Result<(), slint::PlatformError> {
         normal_size: None,
         normal_pos: None,
         widget_placed: false,
+        gadget_applied: false,
     }));
     {
         let mut st = state.borrow_mut();
@@ -2082,6 +2102,7 @@ fn main() -> Result<(), slint::PlatformError> {
             };
             let now_fav = st.settings.toggle_favorite(&path);
             save_settings(&st, &ui);
+            sync_current_favorite(&st, &ui);
             if st.favorites_only {
                 // La lista cambia (una canción deja de aparecer): se reconstruye.
                 refresh_list(&mut st, &ui);
@@ -2098,6 +2119,22 @@ fn main() -> Result<(), slint::PlatformError> {
                 }
                 .into(),
             );
+        }
+    });
+    ui.on_toggle_current_favorite({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            let Some(path) = playing_path(&st) else {
+                return;
+            };
+            st.settings.toggle_favorite(&path);
+            save_settings(&st, &ui);
+            sync_current_favorite(&st, &ui);
+            // La fila de esa canción (si está en la lista visible) cambia de estrella.
+            refresh_list(&mut st, &ui);
         }
     });
     ui.on_favorites_only_changed({
@@ -2386,6 +2423,35 @@ fn main() -> Result<(), slint::PlatformError> {
             }
         }
     });
+    ui.on_gadget_pick_folder({
+        let state = state.clone();
+        let weak = ui.as_weak();
+        move |i| {
+            let Some(ui) = weak.upgrade() else { return };
+            let mut st = state.borrow_mut();
+            let idx = i.max(0) as usize;
+            // Solo carpetas ya leídas: elegir una no toca el disco.
+            let Some((id, ready)) = st
+                .folders
+                .get(idx)
+                .map(|f| (f.id, f.state == LoadState::Ready))
+            else {
+                return;
+            };
+            ui.set_gadget_folders_open(false);
+            if !ready {
+                return;
+            }
+            show_folder(&mut st, &ui, idx);
+            if st.playing_folder != Some(id) && make_playing(&mut st, idx) {
+                refresh_folders(&st, &ui);
+                if let Some(p) = st.player.as_mut() {
+                    p.play_index(0);
+                }
+            }
+            save_settings(&st, &ui);
+        }
+    });
     ui.on_widget_drag({
         let weak = ui.as_weak();
         move |dx, dy| {
@@ -2519,7 +2585,17 @@ fn main() -> Result<(), slint::PlatformError> {
                     refresh_stats_ui(&st, &ui);
                 }
             }
-            // Modo widget: colocarlo tras mostrar la ventana y recordar dónde se suelta.
+            // Gadget de escritorio: estilos nativos y mantenerlo al fondo (cada ~0,5 s).
+            if ui.get_widget_mode() {
+                if ticks % 5 == 0 {
+                    gadget::sync(true, st.settings.widget_on_top);
+                    st.gadget_applied = true;
+                }
+            } else if st.gadget_applied {
+                gadget::sync(false, false);
+                st.gadget_applied = false;
+            }
+            // Modo gadget: colocarlo tras mostrar la ventana y recordar dónde se suelta.
             if ui.get_widget_mode() {
                 if !st.widget_placed {
                     if ticks >= 2 {
