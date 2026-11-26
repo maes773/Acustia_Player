@@ -1,4 +1,4 @@
-# Acustia Player — v0.0.8 Alpha (antes «Auralis»)
+# Acustia Player — v0.0.5 Alpha (antes «Auralis»)
 
 Reproductor de música local para Windows, escrito en Rust con Slint (interfaz neumórfica),
 Symphonia (decodificación) y CPAL (salida de audio). Sin Electron ni Chromium.
